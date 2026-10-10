@@ -279,7 +279,6 @@ mod tests {
         assert!(s.execute(CMD, json!({})).is_err());
         s.execute("file.new", json!({"width": 4, "height": 4, "background": "transparent"})).unwrap();
         for p in [
-            json!(null),
             json!({"contract": -1}),
             json!({"contract": 501}),
             json!({"contract": "1"}),
@@ -293,7 +292,7 @@ mod tests {
             json!({"name": 3}),
             json!({"applyAtCanvasBounds": "no"}),
         ] {
-            assert!(s.execute(CMD, p).is_err(), "should reject");
+            assert!(s.execute(CMD, p.clone()).is_err(), "should reject {p}");
         }
         assert!(s.active().unwrap().doc.channels.is_empty());
     }

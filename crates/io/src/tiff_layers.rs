@@ -283,7 +283,7 @@ fn swap_plane(src: &[u8], bps: usize, to_be: bool) -> Result<Vec<u8>, IoError> {
     if bps == 1 {
         return Ok(src.to_vec());
     }
-    if !matches!(bps, 2 | 4) || src.len() % bps != 0 {
+    if !matches!(bps, 2 | 4) || !src.len().is_multiple_of(bps) {
         return Err(IoError::Unsupported("an extra channel plane is incomplete".into()));
     }
     let mut out = Vec::with_capacity(src.len());
@@ -387,10 +387,10 @@ pub(crate) fn stamp_flat_channels(doc: &Document, img: &mut Image) -> Vec<String
     }
     let max = codecs::MAX_EXTRA_SAMPLES;
     let mut picked: Vec<&AlphaChannel> = doc.channels.iter().take(max).collect();
-    if let Some(q) = &doc.quick_mask {
-        if picked.len() < max {
-            picked.push(q);
-        }
+    if let Some(q) = &doc.quick_mask
+        && picked.len() < max
+    {
+        picked.push(q);
     }
     if total > picked.len() {
         warnings.push(format!("{total} extra channels; TIFF keeps the first {}", picked.len()));

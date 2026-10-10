@@ -901,7 +901,7 @@ fn decode_band(lay: &Layout, dec: &mut Decoder<Patched<'_>>, scratch: &mut Vec<u
         }
     }
     if lay.planar && !lay.extra_at.is_empty() {
-        read_planar_extras(lay, dec, scratch, b, rows, extra.as_deref_mut(), &mut tally)?;
+        read_planar_extras(lay, dec, scratch, b, rows, extra, &mut tally)?;
     }
     finish_band(lay, band);
     Ok(tally)
@@ -1575,14 +1575,14 @@ fn encode_ready(img: &Image, opts: &EncodeOptions) -> Result<Vec<u8>, CodecError
         let mut cursor = Cursor::new(Vec::new());
         if big {
             let mut enc = TiffEncoder::new_big(&mut cursor)?.with_compression(compression).with_predictor(predictor);
-            write_image::<TiffKindBig>(&mut enc, &img, &tags)?;
+            write_image::<TiffKindBig>(&mut enc, img, &tags)?;
         } else {
             let mut enc = TiffEncoder::new(&mut cursor)?.with_compression(compression).with_predictor(predictor);
-            write_image::<TiffKindStandard>(&mut enc, &img, &tags)?;
+            write_image::<TiffKindStandard>(&mut enc, img, &tags)?;
         }
         Ok(cursor.into_inner())
     };
-    let big = opts.tiff_bigtiff || estimated_size(&img, &tags) > CLASSIC_LIMIT;
+    let big = opts.tiff_bigtiff || estimated_size(img, &tags) > CLASSIC_LIMIT;
     match write(big) {
         Ok(v) => Ok(v),
         Err(tiff::TiffError::IntSizeError) if !big => write(true).map_err(|e| CodecError::encode(F, e)),
