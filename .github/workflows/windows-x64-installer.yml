@@ -1,0 +1,142 @@
+# Unsigned Windows x64 installer for this branch.
+#
+# The official pipeline is .github/workflows/release.yml (push to `release`). Its Windows job
+# runs package.ps1, and packaging/windows/sign.ps1 already leaves the files unsigned when
+# WINDOWS_CERTIFICATE / AZURE_* are unset. That job also requires the `release` environment,
+# which a fork does not have and which would wait forever for approval. This workflow is that
+# Windows x64 job without the environment, so a fork can build a downloadable MSI and portable
+# zip. Signing still runs when those secrets exist on the repository; otherwise it warns and
+# continues.
+name: Windows x64 installer
+
+on:
+  push:
+    branches:
+      - cursor/dtf-spot-channel-action-3c53
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-x64-installer-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+  PHOTOCRAFT_BUILD_SHA: ${{ github.sha }}
+  # Same pin as release.yml. Public repo; the app still runs if a later step skips it.
+  CRAFT_FONTS_REF: abb83316d96aa59c1cf64784289e378fe9fa5695
+
+jobs:
+  package:
+    name: Windows x64 MSI and portable zip
+    runs-on: windows-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check out craft-fonts (embedded fonts)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: storytold/craft-fonts
+          ref: ${{ env.CRAFT_FONTS_REF }}
+          path: craft-fonts
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: windows-x64-installer
+      - name: Install WiX
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 5.0.2
+          $tools = Join-Path $env:USERPROFILE '.dotnet\tools'
+          Add-Content -Path $env:GITHUB_PATH -Value $tools
+          $env:PATH = "$tools;$env:PATH"
+          wix extension add -g WixToolset.UI.wixext/5.0.2 WixToolset.Util.wixext/5.0.2
+      - name: Build and package (sign only when secrets exist)
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_SIGNING_ENDPOINT: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+          AZURE_SIGNING_ACCOUNT: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+          AZURE_CERT_PROFILE: ${{ secrets.AZURE_CERT_PROFILE }}
+          CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
+          CRAFT_FONTS_REQUIRED: "1"
+        run: ./packaging/windows/package.ps1 -Arch x64
+      - name: Checksums
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $lines = Get-ChildItem dist\release\* -File | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            '{0}  {1}' -f $hash, $_.Name
+          }
+          $lines | Set-Content -Encoding ascii dist\release\SHA256SUMS.txt
+          Get-Content dist\release\SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: photocraft-windows-x64
+          path: dist/release/*
+          if-no-files-found: error
+          retention-days: 90
+
+  # A published pre-release is one click from the Releases page. Drafts are hidden.
+  # The package job's artifact remains if this step cannot create a release (a fork
+  # whose Actions token is read-only).
+  publish:
+    name: Pre-release
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: photocraft-windows-x64
+          path: dist
+      - name: Publish or update the pre-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -eu
+          tag=dtf-windows-x64
+          title="PhotoCraft Windows x64 (unsigned DTF build)"
+          test -n "$(find dist -name '*.msi' -print -quit)"
+          cat > notes.md <<'EOF'
+          This is an unsigned build of the DTF branch for Windows 10/11 64-bit. It is not an official PhotoCraft release. Windows shows a security warning because the installer is not signed.
+
+          ## Install over C:\Program Files\PhotoCraft
+
+          1. Download the file whose name ends in `-windows-x64.msi` (not the portable zip).
+          2. If the download is blocked, right-click the file, open Properties, tick Unblock, and choose OK.
+          3. Double-click the MSI. If SmartScreen says Windows protected your PC, choose More info, then Run anyway.
+          4. Approve the administrator prompt. Leave the folder as `C:\Program Files\PhotoCraft` and finish the wizard.
+          5. Start PhotoCraft from the Start menu.
+
+          The portable zip is the same program without an installer: unzip it and run photocraft.exe. It does not replace the copy in Program Files.
+
+          A warning in the build log about signing secrets means the files were left unsigned on purpose.
+          EOF
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Updating pre-release $tag"
+            gh release view "$tag" --json assets --jq '.assets[].name' | while read -r asset; do
+              if [ -n "$asset" ]; then
+                gh release delete-asset "$tag" "$asset" --yes
+              fi
+            done
+            gh release edit "$tag" --prerelease --latest=false --title "$title" --target "$GITHUB_SHA" --notes-file notes.md
+            gh release upload "$tag" --clobber dist/*
+          else
+            echo "Creating pre-release $tag"
+            gh release create "$tag" --prerelease --latest=false --title "$title" --target "$GITHUB_SHA" --notes-file notes.md dist/*
+          fi
+          echo "Pre-release: https://github.com/${GH_REPO}/releases/tag/${tag}" >>"$GITHUB_STEP_SUMMARY"
