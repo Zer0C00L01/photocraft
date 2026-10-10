@@ -544,8 +544,8 @@ fn decode_ifd(f: &File<'_>, dir: &Ifd, limits: &Limits) -> Result<Image, CodecEr
     // Samples the colour model does not keep. RGB/CMYK only hand back every sample when asked
     // (photometric patched to black-is-zero below); gray already comes back as multiband.
     let unused = !extra.is_empty() && (spp as usize) > color.saturating_add(usize::from(alpha_at.is_some()));
-    let all_samples = palette.is_none()
-        && ((matches!(photometric, 2 | 5) && alpha_at.is_some_and(|a| a > 0)) || (!planar && matches!(photometric, 2 | 5) && unused));
+    let all_samples =
+        palette.is_none() && ((matches!(photometric, 2 | 5) && alpha_at.is_some_and(|a| a > 0)) || (!planar && matches!(photometric, 2 | 5) && unused));
     let mut patches: Vec<(u64, Vec<u8>)> = Vec::new();
     let encode_u = |v: u64, len: usize| -> Vec<u8> {
         let b = if f.le { v.to_le_bytes() } else { v.to_be_bytes() };
@@ -792,7 +792,15 @@ impl std::ops::Add for Tally {
 /// buffer per worker). `extra` receives samples that are not part of the colour image, one
 /// band of rows at a time, when it is non-empty.
 #[cfg(not(target_arch = "wasm32"))]
-fn decode_bands<'a, O>(lay: &Layout, data: &mut [u8], band_bytes: usize, extra: &mut [u8], extra_band: usize, _first: &mut Decoder<Patched<'a>>, open: &O) -> Result<Tally, CodecError>
+fn decode_bands<'a, O>(
+    lay: &Layout,
+    data: &mut [u8],
+    band_bytes: usize,
+    extra: &mut [u8],
+    extra_band: usize,
+    _first: &mut Decoder<Patched<'a>>,
+    open: &O,
+) -> Result<Tally, CodecError>
 where
     O: Fn() -> Result<Decoder<Patched<'a>>, CodecError> + Sync,
 {
@@ -825,7 +833,15 @@ where
 
 /// Decodes every band into `data`, one after the other.
 #[cfg(target_arch = "wasm32")]
-fn decode_bands<'a, O>(lay: &Layout, data: &mut [u8], band_bytes: usize, extra: &mut [u8], extra_band: usize, first: &mut Decoder<Patched<'a>>, _open: &O) -> Result<Tally, CodecError>
+fn decode_bands<'a, O>(
+    lay: &Layout,
+    data: &mut [u8],
+    band_bytes: usize,
+    extra: &mut [u8],
+    extra_band: usize,
+    first: &mut Decoder<Patched<'a>>,
+    _open: &O,
+) -> Result<Tally, CodecError>
 where
     O: Fn() -> Result<Decoder<Patched<'a>>, CodecError> + Sync,
 {
@@ -844,7 +860,14 @@ where
 }
 
 /// Decodes band `b` (one strip, or one row of tiles, in every plane) into its output rows.
-fn decode_band(lay: &Layout, dec: &mut Decoder<Patched<'_>>, scratch: &mut Vec<u8>, b: usize, band: &mut [u8], mut extra: Option<&mut [u8]>) -> Result<Tally, CodecError> {
+fn decode_band(
+    lay: &Layout,
+    dec: &mut Decoder<Patched<'_>>,
+    scratch: &mut Vec<u8>,
+    b: usize,
+    band: &mut [u8],
+    mut extra: Option<&mut [u8]>,
+) -> Result<Tally, CodecError> {
     let out_row = lay.out_row();
     let rows = band.len() / out_row.max(1);
     let px = lay.out_channels() * lay.out.bytes();
@@ -921,7 +944,15 @@ fn deposit_extras(lay: &Layout, src: &[u8], dst: &mut [u8], n: usize, x0: usize)
 }
 
 /// Planar files store each extra sample as its own plane. Read those planes into `extra`.
-fn read_planar_extras(lay: &Layout, dec: &mut Decoder<Patched<'_>>, scratch: &mut Vec<u8>, b: usize, rows: usize, extra: Option<&mut [u8]>, tally: &mut Tally) -> Result<(), CodecError> {
+fn read_planar_extras(
+    lay: &Layout,
+    dec: &mut Decoder<Patched<'_>>,
+    scratch: &mut Vec<u8>,
+    b: usize,
+    rows: usize,
+    extra: Option<&mut [u8]>,
+    tally: &mut Tally,
+) -> Result<(), CodecError> {
     let Some(extra) = extra else { return Ok(()) };
     let ech = lay.extra_at.len();
     let erow = lay.extra_row();
@@ -1268,8 +1299,6 @@ macro_rules! write_extras {
         }
     };
 }
-
-
 
 fn bytes_as_u16(b: &[u8]) -> Vec<u16> {
     b.chunks_exact(2).map(|c| u16::from_ne_bytes([c[0], c.get(1).copied().unwrap_or(0)])).collect()

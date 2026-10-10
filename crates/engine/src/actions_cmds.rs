@@ -215,13 +215,8 @@ fn from_step(p: &Value, len: usize) -> Result<usize> {
 
 fn list(s: &mut Session, _p: &Value) -> Result<Value> {
     s.actions.align_folders();
-    let actions: Vec<Value> = s
-        .actions
-        .list
-        .iter()
-        .enumerate()
-        .map(|(i, a)| json!({"name": a.name, "set": s.actions.folder(i), "steps": a.steps.len()}))
-        .collect();
+    let actions: Vec<Value> =
+        s.actions.list.iter().enumerate().map(|(i, a)| json!({"name": a.name, "set": s.actions.folder(i), "steps": a.steps.len()})).collect();
     let sets = s.actions.sets.clone();
     let recording = s.actions.recording.and_then(|(_, i)| s.actions.list.get(i).map(|a| a.name.clone()));
     Ok(json!({"actions": actions, "sets": sets, "recording": recording}))
@@ -1050,7 +1045,19 @@ mod tests {
             json!({"from": -3}),
             json!({"action": "missing", "from": 4}),
         ];
-        for id in ["actions.list", "actions.get", "actions.record", "actions.stop", "actions.play", "actions.delete", "actions.move", "actions.newSet", "actions.deleteSet", "actions.setFolder", "actions.setStep"] {
+        for id in [
+            "actions.list",
+            "actions.get",
+            "actions.record",
+            "actions.stop",
+            "actions.play",
+            "actions.delete",
+            "actions.move",
+            "actions.newSet",
+            "actions.deleteSet",
+            "actions.setFolder",
+            "actions.setStep",
+        ] {
             for p in &junk {
                 let _ = s.execute(id, p.clone());
             }
@@ -1127,11 +1134,7 @@ mod tests {
             let dir = std::env::temp_dir().join(format!("pc-actions-{}-v1", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
-            std::fs::write(
-                dir.join("actions.json"),
-                r#"{"version":1,"actions":[{"name":"Old","steps":[["layer.new.layer",{}]]}]}"#,
-            )
-            .unwrap();
+            std::fs::write(dir.join("actions.json"), r#"{"version":1,"actions":[{"name":"Old","steps":[["layer.new.layer",{}]]}]}"#).unwrap();
             let mut loaded = Session::new();
             loaded.attach_preset_store(crate::preset_store::open_dir(&dir));
             let old = loaded.actions.list.iter().position(|a| a.name == "Old").unwrap();

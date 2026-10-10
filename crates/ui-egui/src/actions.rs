@@ -373,9 +373,7 @@ fn step_editor(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                     } else {
                         ui.add(egui::TextEdit::singleline(&mut text).desired_width(160.0).id(egui::Id::new(("step-field", ai, si, key.clone())))).changed()
                     };
-                    if edited
-                        && let Some(obj) = updated.as_object_mut()
-                    {
+                    if edited && let Some(obj) = updated.as_object_mut() {
                         obj.insert(key, json!(text));
                         changed = true;
                     }
@@ -466,7 +464,11 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                 ui.painter().rect_filled(rect, 0.0, t.hover.gamma_multiply(0.5));
             }
             let tri = Rect::from_center_size(pos2(rect.left() + 12.0, rect.center().y), vec2(8.0, 8.0));
-            let pts = if collapsed { vec![tri.left_top(), tri.right_center(), tri.left_bottom()] } else { vec![tri.left_top(), tri.right_top(), tri.center_bottom()] };
+            let pts = if collapsed {
+                vec![tri.left_top(), tri.right_center(), tri.left_bottom()]
+            } else {
+                vec![tri.left_top(), tri.right_top(), tri.center_bottom()]
+            };
             ui.painter().add(egui::Shape::convex_polygon(pts, t.text_dim, Stroke::NONE));
             crate::icons::paint(ui, Rect::from_center_size(pos2(rect.left() + 30.0, rect.center().y), vec2(16.0, 16.0)), "folder", 12.0, t.icon);
             ui.painter().text(pos2(rect.left() + 44.0, rect.center().y), Align2::LEFT_CENTER, set_name, egui::FontId::proportional(12.0), t.text);
@@ -498,107 +500,110 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                 continue;
             }
             for &i in idxs {
-            let (name, steps) = &rows[i];
-            let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::click_and_drag());
-            if reveal == Some((i, 0)) {
-                ui.scroll_to_rect(rect, Some(egui::Align::BOTTOM));
-            }
-            let sel = app.ui.actions.selected == Some(i) && app.ui.actions.selected_step.is_none();
-            resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, sel, name));
-            if sel {
-                ui.painter().rect_filled(rect, 0.0, t.row_selected);
-            } else if resp.hovered() {
-                ui.painter().rect_filled(rect, 0.0, t.hover.gamma_multiply(0.5));
-            }
-            if let Some(change) = drag_row(ui, &resp, DragRow { action: i, step: None }, &t) {
-                moved = Some(change);
-            }
-            let expanded = app.ui.actions.expanded.get(i).copied().unwrap_or(false);
-            let tri = Rect::from_center_size(pos2(rect.left() + 12.0, rect.center().y), vec2(8.0, 8.0));
-            let pts =
-                if expanded { vec![tri.left_top(), tri.right_top(), tri.center_bottom()] } else { vec![tri.left_top(), tri.right_center(), tri.left_bottom()] };
-            ui.painter().add(egui::Shape::convex_polygon(pts, t.text_dim, Stroke::NONE));
-            crate::icons::paint(ui, Rect::from_center_size(pos2(rect.left() + 30.0, rect.center().y), vec2(16.0, 16.0)), "play", 11.0, t.icon);
-            let recording_this = recording.is_some_and(|(_, r)| r == i);
-            let nsteps = steps.len();
-            ui.painter().text(pos2(rect.left() + 44.0, rect.center().y), Align2::LEFT_CENTER, name, egui::FontId::proportional(12.0), t.text);
-            ui.painter().text(
-                pos2(rect.right() - 8.0, rect.center().y),
-                Align2::RIGHT_CENTER,
-                app.session
-                    .prefs()
-                    .shortcuts
-                    .get(&shortcut_id(name))
-                    .filter(|s| !s.is_empty())
-                    .map_or_else(|| format!("{nsteps} steps"), |key| format!("{key} · {nsteps} steps")),
-                egui::FontId::proportional(11.0),
-                t.text_faint,
-            );
-            if recording_this {
-                ui.painter().circle_filled(pos2(rect.right() - 64.0, rect.center().y), 4.0, Color32::from_rgb(230, 60, 60));
-            }
-            if resp.clicked() {
-                app.ui.actions.selected = Some(i);
-                app.ui.actions.selected_step = None;
-                app.ui.actions.selected_set = Some(app.session.actions.folder(i).to_string());
-                if resp.interact_pointer_pos().is_some_and(|p| p.x < rect.left() + 20.0) {
-                    if app.ui.actions.expanded.len() <= i {
-                        app.ui.actions.expanded.resize(i + 1, false);
-                    }
-                    app.ui.actions.expanded[i] = !expanded;
+                let (name, steps) = &rows[i];
+                let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::click_and_drag());
+                if reveal == Some((i, 0)) {
+                    ui.scroll_to_rect(rect, Some(egui::Align::BOTTOM));
                 }
-            }
-            resp.context_menu(|ui| {
-                ui.label(tl!("Keyboard Shortcuts"));
-                let current = app.session.prefs().shortcuts.get(&shortcut_id(name)).cloned().unwrap_or_default();
-                for key in std::iter::once(String::new()).chain((1..=12).map(|n| format!("F{n}"))) {
-                    let label = if key.is_empty() { tl!("None").to_string() } else { key.clone() };
-                    if ui.selectable_label(current == key, label).clicked() {
-                        let _ = assign_shortcut(app, name, &key);
+                let sel = app.ui.actions.selected == Some(i) && app.ui.actions.selected_step.is_none();
+                resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, sel, name));
+                if sel {
+                    ui.painter().rect_filled(rect, 0.0, t.row_selected);
+                } else if resp.hovered() {
+                    ui.painter().rect_filled(rect, 0.0, t.hover.gamma_multiply(0.5));
+                }
+                if let Some(change) = drag_row(ui, &resp, DragRow { action: i, step: None }, &t) {
+                    moved = Some(change);
+                }
+                let expanded = app.ui.actions.expanded.get(i).copied().unwrap_or(false);
+                let tri = Rect::from_center_size(pos2(rect.left() + 12.0, rect.center().y), vec2(8.0, 8.0));
+                let pts = if expanded {
+                    vec![tri.left_top(), tri.right_top(), tri.center_bottom()]
+                } else {
+                    vec![tri.left_top(), tri.right_center(), tri.left_bottom()]
+                };
+                ui.painter().add(egui::Shape::convex_polygon(pts, t.text_dim, Stroke::NONE));
+                crate::icons::paint(ui, Rect::from_center_size(pos2(rect.left() + 30.0, rect.center().y), vec2(16.0, 16.0)), "play", 11.0, t.icon);
+                let recording_this = recording.is_some_and(|(_, r)| r == i);
+                let nsteps = steps.len();
+                ui.painter().text(pos2(rect.left() + 44.0, rect.center().y), Align2::LEFT_CENTER, name, egui::FontId::proportional(12.0), t.text);
+                ui.painter().text(
+                    pos2(rect.right() - 8.0, rect.center().y),
+                    Align2::RIGHT_CENTER,
+                    app.session
+                        .prefs()
+                        .shortcuts
+                        .get(&shortcut_id(name))
+                        .filter(|s| !s.is_empty())
+                        .map_or_else(|| format!("{nsteps} steps"), |key| format!("{key} · {nsteps} steps")),
+                    egui::FontId::proportional(11.0),
+                    t.text_faint,
+                );
+                if recording_this {
+                    ui.painter().circle_filled(pos2(rect.right() - 64.0, rect.center().y), 4.0, Color32::from_rgb(230, 60, 60));
+                }
+                if resp.clicked() {
+                    app.ui.actions.selected = Some(i);
+                    app.ui.actions.selected_step = None;
+                    app.ui.actions.selected_set = Some(app.session.actions.folder(i).to_string());
+                    if resp.interact_pointer_pos().is_some_and(|p| p.x < rect.left() + 20.0) {
+                        if app.ui.actions.expanded.len() <= i {
+                            app.ui.actions.expanded.resize(i + 1, false);
+                        }
+                        app.ui.actions.expanded[i] = !expanded;
+                    }
+                }
+                resp.context_menu(|ui| {
+                    ui.label(tl!("Keyboard Shortcuts"));
+                    let current = app.session.prefs().shortcuts.get(&shortcut_id(name)).cloned().unwrap_or_default();
+                    for key in std::iter::once(String::new()).chain((1..=12).map(|n| format!("F{n}"))) {
+                        let label = if key.is_empty() { tl!("None").to_string() } else { key.clone() };
+                        if ui.selectable_label(current == key, label).clicked() {
+                            let _ = assign_shortcut(app, name, &key);
+                            ui.close();
+                        }
+                    }
+                    ui.separator();
+                    ui.label(tl!("Folder"));
+                    let here = app.session.actions.folder(i).to_string();
+                    if ui.selectable_label(here.is_empty(), tl!("Ungrouped Actions")).clicked() {
+                        let _ = app.run("actions.setFolder", json!({"action": i, "set": ""}));
                         ui.close();
                     }
+                    for set in app.session.actions.sets.clone() {
+                        if ui.selectable_label(here == set, set.clone()).clicked() {
+                            let _ = app.run("actions.setFolder", json!({"action": i, "set": set}));
+                            ui.close();
+                        }
+                    }
+                });
+                if resp.double_clicked() {
+                    play_idx = Some(i);
                 }
-                ui.separator();
-                ui.label(tl!("Folder"));
-                let here = app.session.actions.folder(i).to_string();
-                if ui.selectable_label(here.is_empty(), tl!("Ungrouped Actions")).clicked() {
-                    let _ = app.run("actions.setFolder", json!({"action": i, "set": ""}));
-                    ui.close();
-                }
-                for set in app.session.actions.sets.clone() {
-                    if ui.selectable_label(here == set, set.clone()).clicked() {
-                        let _ = app.run("actions.setFolder", json!({"action": i, "set": set}));
-                        ui.close();
-                    }
-                }
-            });
-            if resp.double_clicked() {
-                play_idx = Some(i);
-            }
-            if expanded {
-                for (step, (id, params)) in steps.iter().enumerate() {
-                    let (r, response) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), Sense::click_and_drag());
-                    if reveal == Some((i, step + 1)) {
-                        ui.scroll_to_rect(r, Some(egui::Align::BOTTOM));
-                    }
-                    let label = step_label(id, params);
-                    let selected = app.ui.actions.selected == Some(i) && app.ui.actions.selected_step == Some(step);
-                    response.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, selected, &label));
-                    if selected {
-                        ui.painter().rect_filled(r, 0.0, t.row_selected);
-                    } else if response.hovered() {
-                        ui.painter().rect_filled(r, 0.0, t.hover.gamma_multiply(0.5));
-                    }
-                    if let Some(change) = drag_row(ui, &response, DragRow { action: i, step: Some(step) }, &t) {
-                        moved = Some(change);
-                    }
-                    ui.painter().text(pos2(r.left() + 44.0, r.center().y), Align2::LEFT_CENTER, label, egui::FontId::proportional(11.5), t.text_dim);
-                    if response.clicked() {
-                        app.ui.actions.selected = Some(i);
-                        app.ui.actions.selected_step = Some(step);
+                if expanded {
+                    for (step, (id, params)) in steps.iter().enumerate() {
+                        let (r, response) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), Sense::click_and_drag());
+                        if reveal == Some((i, step + 1)) {
+                            ui.scroll_to_rect(r, Some(egui::Align::BOTTOM));
+                        }
+                        let label = step_label(id, params);
+                        let selected = app.ui.actions.selected == Some(i) && app.ui.actions.selected_step == Some(step);
+                        response.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, selected, &label));
+                        if selected {
+                            ui.painter().rect_filled(r, 0.0, t.row_selected);
+                        } else if response.hovered() {
+                            ui.painter().rect_filled(r, 0.0, t.hover.gamma_multiply(0.5));
+                        }
+                        if let Some(change) = drag_row(ui, &response, DragRow { action: i, step: Some(step) }, &t) {
+                            moved = Some(change);
+                        }
+                        ui.painter().text(pos2(r.left() + 44.0, r.center().y), Align2::LEFT_CENTER, label, egui::FontId::proportional(11.5), t.text_dim);
+                        if response.clicked() {
+                            app.ui.actions.selected = Some(i);
+                            app.ui.actions.selected_step = Some(step);
+                        }
                     }
                 }
-            }
             }
         }
     });
@@ -629,7 +634,8 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         if crate::icons::button(ui, "plus", 24.0, false, tl!("Create new action")).clicked() && !recording_now {
             begin_recording(app, false);
         }
-        if crate::icons::button(ui, "folder-plus", 24.0, false, tl!("Create new set")).clicked() && !recording_now
+        if crate::icons::button(ui, "folder-plus", 24.0, false, tl!("Create new set")).clicked()
+            && !recording_now
             && let Ok(v) = app.run("actions.newSet", json!({}))
             && let Some(name) = v.get("set").and_then(Value::as_str)
         {
@@ -639,7 +645,8 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
             app.ui.actions.collapsed_sets.retain(|set| set != name);
         }
         let set_selected = app.ui.actions.selected.is_none() && app.ui.actions.selected_set.as_deref().is_some_and(|set| !set.is_empty());
-        let can_delete = if set_selected { !recording_now } else { app.ui.actions.selected.is_some() && (!recording_now || app.ui.actions.selected_step.is_some()) };
+        let can_delete =
+            if set_selected { !recording_now } else { app.ui.actions.selected.is_some() && (!recording_now || app.ui.actions.selected_step.is_some()) };
         ui.add_enabled_ui(can_delete, |ui| {
             let response = crate::icons::button(ui, "trash", 24.0, false, tl!("Delete"));
             response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, can_delete, tl!("Delete")));
@@ -913,10 +920,10 @@ mod tests {
         use egui_kittest::{Harness, kittest::Queryable};
         let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
         app.session.actions.sets.push("DTF".into());
-        app.session.actions.list.push(Action {
-            name: "Spot".into(),
-            steps: vec![("image.dtf".into(), json!({"contract": 1, "name": "Spot Color 1", "solidity": 60}))],
-        });
+        app.session
+            .actions
+            .list
+            .push(Action { name: "Spot".into(), steps: vec![("image.dtf".into(), json!({"contract": 1, "name": "Spot Color 1", "solidity": 60}))] });
         app.session.actions.folders.push("DTF".into());
         app.session.actions.list.push(Action { name: "Mine".into(), steps: vec![] });
         app.ui.actions.expanded = vec![true, false];

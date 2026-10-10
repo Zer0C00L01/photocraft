@@ -491,7 +491,11 @@ mod tests {
             let tiff = photocraft_io::export(&doc, name, &opts).unwrap();
             assert!(!tiff.warnings.iter().any(|w| w.contains("not written")), "{name}: {:?}", tiff.warnings);
             let back = photocraft_io::import(name, &tiff.bytes).unwrap().document;
-            let ch = back.channels.iter().find(|c| c.name == DEFAULT_NAME).unwrap_or_else(|| panic!("{name}: channels {:?}", back.channels.iter().map(|c| &c.name).collect::<Vec<_>>()));
+            let ch = back
+                .channels
+                .iter()
+                .find(|c| c.name == DEFAULT_NAME)
+                .unwrap_or_else(|| panic!("{name}: channels {:?}", back.channels.iter().map(|c| &c.name).collect::<Vec<_>>()));
             let (ink, sol) = ch.spot.expect("spot");
             assert_eq!(ink.to_rgb(), [1.0, 0.0, 0.0], "{name}");
             assert!((sol - 0.6).abs() < 1e-4, "{name}");
@@ -535,7 +539,8 @@ mod tests {
         s.execute("file.new", json!({"width": 6, "height": 6, "background": "transparent"})).unwrap();
         paint_rect(&mut s, Rect::new(1, 1, 5, 5));
         ensure_preset(&mut s);
-        s.execute(CMD, json!({"contract": 0, "name": "Varnish", "color": "#00ff00", "solidity": 40, "source": "composite", "applyAtCanvasBounds": true})).unwrap();
+        s.execute(CMD, json!({"contract": 0, "name": "Varnish", "color": "#00ff00", "solidity": 40, "source": "composite", "applyAtCanvasBounds": true}))
+            .unwrap();
         let saved = s.prefs().dialogs.get(CMD).expect("remembered");
         assert_eq!(saved["name"], "Varnish");
         assert_eq!(saved["source"], "composite");

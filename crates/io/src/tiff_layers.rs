@@ -412,11 +412,7 @@ pub(crate) fn stamp_flat_channels(doc: &Document, img: &mut Image) -> Vec<String
     }
     let names: Vec<&str> = picked.iter().map(|c| c.name.as_str()).collect();
     let quick_last = matches!((picked.last(), doc.quick_mask.as_ref()), (Some(p), Some(q)) if std::ptr::eq(*p, q));
-    let quick_id = if quick_last {
-        u16::try_from(img.layout().channels().saturating_add(picked.len()).saturating_sub(1)).ok()
-    } else {
-        None
-    };
+    let quick_id = if quick_last { u16::try_from(img.layout().channels().saturating_add(picked.len()).saturating_sub(1)).ok() } else { None };
     match channel_resources(img.meta.photoshop_resources.as_deref(), &names, &picked, quick_id) {
         Ok(bytes) => img.meta.photoshop_resources = Some(bytes),
         Err(e) => warnings.push(format!("spot channel options were not written to the TIFF: {e}")),
