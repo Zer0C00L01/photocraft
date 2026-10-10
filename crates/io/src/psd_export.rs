@@ -404,6 +404,8 @@ impl Ex {
         let mut flags = LayerFlags(0);
         flags.set_hidden(!l.visible);
         flags.set_transparency_protected(l.locks.transparency);
+        // Bit 3 (with bit 4 clear) is the flag Photoshop sets on every layer it writes.
+        flags.0 |= LayerFlags::BIT4_USEFUL;
         let mut blocks = vec![TaggedBlock::unicode_name(&l.name), TaggedBlock::layer_id(id)];
         let lspf = blocks::lspf_from_locks(&l.locks);
         if lspf != 0 {
@@ -920,6 +922,8 @@ impl Ex {
             match &l.content {
                 LayerContent::Group(g) => {
                     let id = self.fresh_id();
+                    let mut divider_flags = LayerFlags(0);
+                    divider_flags.0 |= LayerFlags::BIT4_USEFUL;
                     self.records.push(LayerRecord {
                         channels: self.empty_channels(),
                         blending_ranges: BlendingRanges::full(self.cc),
@@ -929,6 +933,7 @@ impl Ex {
                             TaggedBlock::layer_id(id),
                             TaggedBlock::section_divider(SectionType::BoundingDivider, None, None),
                         ],
+                        flags: divider_flags,
                         ..Default::default()
                     });
                     self.emit(&g.children);
@@ -1045,11 +1050,9 @@ pub(crate) fn pascal_names_resource(names: &[&str]) -> Vec<u8> {
         let n = b.len().min(255);
         v.push(n as u8);
         v.extend_from_slice(&b[..n]);
-        // Each Pascal string is padded so the length byte plus the text is even (PSD resource 1006).
-        if (1 + n) % 2 == 1 {
-            v.push(0);
-        }
     }
+    // No per-string pad: Photoshop's resource 1006 for "Spot Color 1" is 13 bytes
+    // (length byte + 12 characters). The 8BIM container pads an odd resource separately.
     v
 }
 
@@ -1555,7 +1558,7 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32) -
         resources,
         layer_info,
         layer_info_placement: placement,
-        global_layer_mask: (has_layers || !global_blocks.is_empty()).then(GlobalLayerMask::default),
+        global_layer_mask: (has_layers || !global_blocks.is_empty()).then(GlobalLayerMask::photoshop_default),
         global_blocks,
         layer_mask_trailing: Vec::new(),
         image_data,

@@ -118,7 +118,15 @@ pub(crate) fn import_layered(name: &str, img: &Image, layers: &[u8]) -> Result<I
     let channels = u16::try_from(img.layout().channels().saturating_add(added)).map_err(|_| IoError::Unsupported("too many channels".into()))?;
     let header = Header::new(isd.version, w, h, channels, depth, mode);
     let image_data = ImageData { compression: Compression::Raw, data };
-    let file = isd.into_psd(header, resources, image_data);
+    let mut file = isd.into_psd(header, resources, image_data);
+    // Empty `Patt` and the default filter mask are written so Photoshop's block list matches
+    // a file it saved. They carry nothing the document stores, so they are not kept: a
+    // round trip would otherwise grow `metadata.psd_global_blocks` on every open.
+    file.global_blocks.retain(|b| {
+        let empty_pattern = matches!(&b.key, b"Patt" | b"Pat2" | b"Pat3") && b.data.is_empty();
+        let default_filter_mask = &b.key == b"FMsk" && b.data.as_slice() == FILTER_MASK_DEFAULT;
+        !empty_pattern && !default_filter_mask
+    });
     let (mut doc, w) = psd_to_document(&file);
     warnings.extend(w);
     doc.name = name.to_string();
@@ -203,25 +211,47 @@ pub(crate) fn export_layered(doc: &Document, opts: &ExportOptions) -> Result<Exp
     }
     let mut warnings = Vec::new();
     let big = doc.size.width > 30_000 || doc.size.height > 30_000;
-    // The PSD exporter renders the composite we need for the TIFF itself: unmatted (the TIFF
-    // keeps straight alpha) and uncompressed (its planes are interleaved below).
-    let psd_opts = PsdExportOptions { force_psb: opts.force_psb || big, merged_matte: false, merged_compression: Compression::Raw };
+    // A spot (or any user channel) is saved the way Photoshop's TIFF dialog does with
+    // "Save Transparency" off: the composite is colour plus those channels, matted on white,
+    // and each layer keeps its own transparency. With no user channel the composite stays
+    // straight RGBA, which is what a plain transparent TIFF already round-trips as.
+    let user_channels = !doc.channels.is_empty() || doc.quick_mask.is_some();
+    let psd_opts = PsdExportOptions { force_psb: opts.force_psb || big, merged_matte: user_channels, merged_compression: Compression::Raw };
     let (file, w) = document_to_psd_with(doc, &psd_opts);
     warnings.extend(w);
     let order = if codecs::tiff_writes_little_endian() { ByteOrder::Little } else { ByteOrder::Big };
-    // Photoshop and print RIPs ignore ExtraSamples values and pair every sample past the colour
-    // channels, in order, with alpha names / DisplayInfo. The merged transparency must not occupy
-    // that first slot when a spot is also stored, or the spot's name is attached to the alpha
-    // plane and the spot pixels themselves are left undescribed. Layer transparency stays in each
-    // layer's own channel; only the merged image omits it.
+    // Photoshop pairs alpha-name resources with samples past the colour channels and ignores
+    // the ExtraSamples kind. The merged transparency must not occupy that first slot when a
+    // spot is also stored. Layer transparency stays in each layer's channel −1.
     let mut isd = ImageSourceData::from_psd(&file);
     let spot_extras = file.header.channels as usize > {
         let cc = doc.pixel_format().mode.color_channels();
         let alpha = file.layer_info.as_ref().is_some_and(|l| l.merged_alpha);
         cc + usize::from(alpha)
     };
+    // Positive layer count: the merged image's first extra sample is not transparency
+    // (Photoshop's own spot TIFF does this; a negative count would claim the spot plane is alpha).
     if spot_extras && let Some(info) = &mut isd.layer_info {
         info.merged_alpha = false;
+    }
+    if let Some(info) = &mut isd.layer_info {
+        for layer in &mut info.layers {
+            photoshop_layer_blocks(&mut layer.blocks);
+        }
+    }
+    // Photoshop reads a fixed 14-byte user-mask record from `LMsk` and an empty `Patt`
+    // before the filter mask. A zero-length `LMsk` is what makes it report that the
+    // layer data could not be read.
+    if let Some(mask) = &mut isd.global_layer_mask
+        && mask.data.len() < 14
+    {
+        *mask = photocraft_psd::GlobalLayerMask::photoshop_default();
+    }
+    if !isd.global_blocks.iter().any(|b| matches!(&b.key, b"Patt" | b"Pat2" | b"Pat3")) {
+        isd.global_blocks.insert(0, photocraft_psd::TaggedBlock::new(*b"Patt", Vec::new()));
+    }
+    if !isd.global_blocks.iter().any(|b| &b.key == b"FMsk") {
+        isd.global_blocks.push(photocraft_psd::TaggedBlock::new(*b"FMsk", FILTER_MASK_DEFAULT.to_vec()));
     }
     let (layers, w) = isd.to_bytes(order)?;
     warnings.extend(w.into_iter().map(|w| format!("layer data: {w}")));
@@ -246,7 +276,10 @@ pub(crate) fn export_layered(doc: &Document, opts: &ExportOptions) -> Result<Exp
     // described the PSD merged image (which still included transparency).
     if kept > 0 {
         resources.retain(|r| r.id != crate::channel_map::ALPHA_IDENTIFIERS);
-        resources.push(ImageResource::new(crate::channel_map::ALPHA_IDENTIFIERS, crate::channel_map::alpha_identifiers(kept)));
+        // Photoshop's spot TIFF (RGB, Save Transparency off) stores identifier 3: the spot's
+        // index among the IFD samples, not a 1-based count of user channels.
+        let first = u32::try_from(cc.saturating_add(usize::from(write_alpha))).unwrap_or(u32::MAX);
+        resources.push(ImageResource::new(crate::channel_map::ALPHA_IDENTIFIERS, crate::channel_map::alpha_identifiers_from(first, kept)));
     }
     // Resource 1022 names a channel of the PSD merged image, which counts the transparency plane.
     // The IFD below does not, so the id moves back by one.
@@ -284,6 +317,45 @@ pub(crate) fn export_layered(doc: &Document, opts: &ExportOptions) -> Result<Exp
         ..Default::default()
     };
     encode_image(&img, Format::Tiff, opts, warnings)
+}
+
+/// Filter-mask block (`FMsk`) Photoshop writes next to a layered TIFF: the same red 50%
+/// overlay as [`photocraft_psd::GlobalLayerMask::photoshop_default`], without the kind byte.
+const FILTER_MASK_DEFAULT: &[u8] = &[0, 0, 0xff, 0xff, 0, 0, 0, 0, 0, 0, 0, 50];
+
+/// Blocks Photoshop writes on every layer of a layered TIFF, when the layer does not
+/// already carry them. Defaults match a plain pixel layer (clipped-as-group on, nothing
+/// locked, no label).
+fn photoshop_layer_blocks(blocks: &mut Vec<photocraft_psd::TaggedBlock>) {
+    let has = |k: &[u8; 4]| blocks.iter().any(|b| &b.key == k);
+    let mut add = Vec::new();
+    if !has(b"lnsr") {
+        add.push(photocraft_psd::TaggedBlock::name_source(*b"layr"));
+    }
+    if !has(b"clbl") {
+        add.push(photocraft_psd::TaggedBlock::blend_clipped_as_group(true));
+    }
+    if !has(b"infx") {
+        add.push(photocraft_psd::TaggedBlock::blend_interior_elements(false));
+    }
+    if !has(b"knko") {
+        add.push(photocraft_psd::TaggedBlock::knockout(0));
+    }
+    if !has(b"lspf") {
+        add.push(photocraft_psd::TaggedBlock::protection(0));
+    }
+    if !has(b"lclr") {
+        add.push(photocraft_psd::TaggedBlock::sheet_color(0));
+    }
+    let at = blocks
+        .iter()
+        .position(|b| &b.key == b"lyid")
+        .map(|i| i + 1)
+        .or_else(|| blocks.iter().position(|b| &b.key == b"luni").map(|i| i + 1))
+        .unwrap_or(blocks.len());
+    for (i, block) in add.into_iter().enumerate() {
+        blocks.insert(at.saturating_add(i), block);
+    }
 }
 
 /// Removes the blocks a document kept verbatim from a little-endian TIFF because their layout
@@ -408,9 +480,12 @@ fn channel_plane(channel: &AlphaChannel, canvas: Rect, sample: CSample) -> Resul
     Ok(bytes)
 }
 
-/// Drops the straight alpha sample so `img` is colour channels only. Metadata is kept.
-/// `false` when there is no alpha or the buffer is not one sample per channel.
-fn strip_alpha(img: &mut Image) -> bool {
+/// Composites straight alpha over white and drops it. Photoshop's TIFF save with
+/// "Save Transparency" off stores that matte in the colour samples and keeps transparency
+/// only inside each layer. Fully opaque pixels are copied unchanged, so they stay identical
+/// to a composite that was quantized before the matte. `false` when there is no alpha or
+/// the buffer is not one sample per channel.
+fn matte_and_drop_alpha(img: &mut Image) -> bool {
     if !img.layout().has_alpha() {
         return false;
     }
@@ -420,13 +495,20 @@ fn strip_alpha(img: &mut Image) -> bool {
     let bps = sample.bytes();
     let keep = dst.channels().saturating_mul(bps);
     let stride = img.layout().channels().saturating_mul(bps);
-    if stride == 0 || keep == 0 || !img.data().len().is_multiple_of(stride) {
+    if stride == 0 || keep == 0 || bps == 0 || stride <= keep || !img.data().len().is_multiple_of(stride) {
         return false;
     }
+    let cmyk = img.layout().is_cmyk();
+    let white_byte: u8 = if cmyk { 0 } else { 255 };
+    let white_u16: u16 = if cmyk { 0 } else { u16::MAX };
+    let white_f: f32 = if cmyk { 0.0 } else { 1.0 };
     let mut out = Vec::with_capacity(img.data().len() / stride * keep);
     for px in img.data().chunks_exact(stride) {
         let Some(color) = px.get(..keep) else { return false };
-        out.extend_from_slice(color);
+        let Some(alpha) = px.get(keep..keep.saturating_add(bps)) else { return false };
+        if !matte_pixel(sample, color, alpha, white_byte, white_u16, white_f, &mut out) {
+            return false;
+        }
     }
     let icc = img.icc.clone();
     let meta = img.meta.clone();
@@ -437,6 +519,92 @@ fn strip_alpha(img: &mut Image) -> bool {
     next.warnings = warnings;
     *img = next;
     true
+}
+
+/// One pixel of [`matte_and_drop_alpha`]. Opaque samples are copied; a clear pixel becomes
+/// `white`; anything in between is `c·a + white·(1−a)` in normalized space.
+fn matte_pixel(sample: CSample, color: &[u8], alpha: &[u8], white_byte: u8, white_u16: u16, white_f: f32, out: &mut Vec<u8>) -> bool {
+    match sample {
+        CSample::U8 => {
+            let Some(&a) = alpha.first() else { return false };
+            if a == 255 {
+                out.extend_from_slice(color);
+            } else if a == 0 {
+                out.resize(out.len().saturating_add(color.len()), white_byte);
+            } else {
+                let af = f32::from(a) / 255.0;
+                for &c in color {
+                    let m = crate::pixels::matte(f32::from(c) / 255.0, af, white_f);
+                    out.push((m.clamp(0.0, 1.0) * 255.0).round() as u8);
+                }
+            }
+        }
+        CSample::U16 => {
+            let Some(a) = ne_u16(alpha) else { return false };
+            if a == u16::MAX {
+                out.extend_from_slice(color);
+            } else if a == 0 {
+                for _ in 0..color.len() / 2 {
+                    out.extend_from_slice(&white_u16.to_ne_bytes());
+                }
+            } else {
+                let af = f32::from(a) / 65535.0;
+                for pair in color.chunks_exact(2) {
+                    let Some(c) = ne_u16(pair) else { return false };
+                    let m = crate::pixels::matte(f32::from(c) / 65535.0, af, white_f);
+                    out.extend_from_slice(&((m.clamp(0.0, 1.0) * 65535.0).round() as u16).to_ne_bytes());
+                }
+            }
+        }
+        CSample::F32 => {
+            let Some(a) = ne_f32(alpha) else { return false };
+            if a == 1.0 {
+                out.extend_from_slice(color);
+            } else if a == 0.0 || !a.is_finite() {
+                for _ in 0..color.len() / 4 {
+                    out.extend_from_slice(&white_f.to_ne_bytes());
+                }
+            } else {
+                let af = a.clamp(0.0, 1.0);
+                for quad in color.chunks_exact(4) {
+                    let Some(c) = ne_f32(quad) else { return false };
+                    let m = crate::pixels::matte(c, af, white_f);
+                    out.extend_from_slice(&m.to_ne_bytes());
+                }
+            }
+        }
+        CSample::F16 => {
+            let Some(bits) = ne_u16(alpha) else { return false };
+            let a = codecs::f16::from_bits(bits).to_f32();
+            if a == 1.0 {
+                out.extend_from_slice(color);
+            } else if a == 0.0 || !a.is_finite() {
+                let w = codecs::f16::from_f32(white_f).to_bits().to_ne_bytes();
+                for _ in 0..color.len() / 2 {
+                    out.extend_from_slice(&w);
+                }
+            } else {
+                let af = a.clamp(0.0, 1.0);
+                for pair in color.chunks_exact(2) {
+                    let Some(cbits) = ne_u16(pair) else { return false };
+                    let c = codecs::f16::from_bits(cbits).to_f32();
+                    let m = codecs::f16::from_f32(crate::pixels::matte(c, af, white_f)).to_bits();
+                    out.extend_from_slice(&m.to_ne_bytes());
+                }
+            }
+        }
+    }
+    true
+}
+
+fn ne_u16(b: &[u8]) -> Option<u16> {
+    let arr: [u8; 2] = b.get(..2)?.try_into().ok()?;
+    Some(u16::from_ne_bytes(arr))
+}
+
+fn ne_f32(b: &[u8]) -> Option<f32> {
+    let arr: [u8; 4] = b.get(..4)?.try_into().ok()?;
+    Some(f32::from_ne_bytes(arr))
 }
 
 /// Writes alpha and spot channels (and a Quick Mask) into a flat TIFF: extra samples in the
@@ -483,12 +651,15 @@ pub(crate) fn stamp_flat_channels(doc: &Document, img: &mut Image) -> Vec<String
     let names: Vec<&str> = picked.iter().map(|c| c.name.as_str()).collect();
     let quick_last = matches!((picked.last(), doc.quick_mask.as_ref()), (Some(p), Some(q)) if std::ptr::eq(*p, q));
     let color_channels = img.layout().color_channels();
-    if img.layout().has_alpha() && !strip_alpha(img) {
+    // Save Transparency off: the colour samples are the composite over white, and the
+    // alpha plane is not an extra sample (it would be named as the first spot).
+    if img.layout().has_alpha() && !matte_and_drop_alpha(img) {
         warnings.push("extra channels were not written: the composite transparency could not be separated from them".into());
         return warnings;
     }
     let quick_id = if quick_last { u16::try_from(color_channels.saturating_add(picked.len()).saturating_sub(1)).ok() } else { None };
-    match channel_resources(img.meta.photoshop_resources.as_deref(), &names, &picked, quick_id) {
+    let first_id = u32::try_from(color_channels).unwrap_or(u32::MAX);
+    match channel_resources(img.meta.photoshop_resources.as_deref(), &names, &picked, quick_id, first_id) {
         Ok(bytes) => img.meta.photoshop_resources = Some(bytes),
         Err(e) => warnings.push(format!("spot channel options were not written to the TIFF: {e}")),
     }
@@ -497,7 +668,7 @@ pub(crate) fn stamp_flat_channels(doc: &Document, img: &mut Image) -> Vec<String
 }
 
 /// Existing Photoshop resources with the channel-name, display-info and quick-mask blocks replaced.
-fn channel_resources(existing: Option<&[u8]>, names: &[&str], channels: &[&AlphaChannel], quick_id: Option<u16>) -> Result<Vec<u8>, IoError> {
+fn channel_resources(existing: Option<&[u8]>, names: &[&str], channels: &[&AlphaChannel], quick_id: Option<u16>, first_id: u32) -> Result<Vec<u8>, IoError> {
     let mut resources = match existing.filter(|b| !b.is_empty()) {
         Some(b) => resources_from_bytes(b)?.0,
         None => Vec::new(),
@@ -508,7 +679,7 @@ fn channel_resources(existing: Option<&[u8]>, names: &[&str], channels: &[&Alpha
     resources.push(ImageResource::new(1006, crate::psd_export::pascal_names_resource(names)));
     resources.push(ImageResource::new(1045, crate::psd_export::unicode_names_resource(names)));
     resources.push(ImageResource::new(crate::channel_map::DISPLAY_INFO, crate::channel_map::display_info(channels)));
-    resources.push(ImageResource::new(crate::channel_map::ALPHA_IDENTIFIERS, crate::channel_map::alpha_identifiers(names.len())));
+    resources.push(ImageResource::new(crate::channel_map::ALPHA_IDENTIFIERS, crate::channel_map::alpha_identifiers_from(first_id, names.len())));
     if let Some(id) = quick_id {
         let mut data = id.to_be_bytes().to_vec();
         data.push(0);

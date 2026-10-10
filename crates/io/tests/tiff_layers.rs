@@ -467,21 +467,26 @@ fn dtf_like_spot_is_written_in_full() {
         assert_eq!(extra, vec![0], "{name} ExtraSamples");
         assert!(rows > 0 && rows < h, "{name} rows_per_strip {rows}");
         assert_plane(&samples, 4, 3, &spot_bytes);
-        seen.push(samples);
+        seen.push(samples.clone());
 
+        // Outside the artwork the composite is matted to white (Save Transparency off). The
+        // spot at that pixel is not zero, so a reader that binds the name to the alpha fails.
+        let at = (10 * w as usize + 10) * 4;
+        assert_eq!(&samples[at..at + 3], &[255, 255, 255], "{name} matted rgb");
         let (resources, layer_tag) = tags(&r.bytes);
         let resources = resources.expect("photoshop resources");
         let (blocks, warnings) = resources_from_bytes(&resources).unwrap();
         assert!(warnings.is_empty(), "{name} {warnings:?}");
         let block = |id: u16| blocks.iter().find(|b| b.id == id).unwrap_or_else(|| panic!("{name} missing {id}"));
-        // "Spot Color 1" is 12 bytes: length byte + text is odd, so resource 1006 pads to even.
-        assert_eq!(block(1006).data.len(), 14, "{name}");
+        // "Spot Color 1" is 12 characters: Photoshop stores 13 bytes and pads the 8BIM block, not the string.
+        assert_eq!(block(1006).data, b"\x0cSpot Color 1", "{name}");
         assert_eq!(block(1045).data.len(), 30, "{name}");
         let info = &block(1077).data;
-        assert_eq!(info.len(), 18, "{name}");
+        assert_eq!(info.len(), 17, "{name}");
         assert_eq!(u16::from_be_bytes([info[14], info[15]]), 60, "{name} solidity");
         assert_eq!(info[16], 2, "{name} spot kind");
-        assert_eq!(block(1053).data, 1u32.to_be_bytes(), "{name} channel id");
+        // RGB occupies samples 0..2, so the spot's identifier is 3.
+        assert_eq!(block(1053).data, 3u32.to_be_bytes(), "{name} channel id");
 
         let back = import("dtf.tif", &r.bytes).unwrap().document;
         assert_eq!(back.channels.len(), 1, "{name}");
@@ -495,7 +500,15 @@ fn dtf_like_spot_is_written_in_full() {
             let layer_tag = layer_tag.expect("layer tag");
             let (isd, w) = ImageSourceData::from_bytes(&layer_tag).unwrap();
             assert!(w.is_empty(), "{w:?}");
-            assert!(!isd.layer_info.expect("layers").merged_alpha, "{name}");
+            let info = isd.layer_info.expect("layers");
+            assert!(!info.merged_alpha, "{name}");
+            assert!(info.layers.iter().all(|l| l.flags.0 & 0x08 != 0), "{name} photoshop flag");
+            assert!(info.layers.iter().all(|l| l.blocks.iter().any(|b| &b.key == b"lnsr")), "{name} lnsr");
+            let mask = isd.global_layer_mask.expect("LMsk");
+            assert_eq!(mask.data.len(), 14, "{name}");
+            assert_eq!(mask.opacity(), Some(50));
+            assert_eq!(mask.kind(), Some(128));
+            assert_photoshop_layered_tiff(&r.bytes, true);
             assert_eq!(back.layers.len(), 2, "{name}");
             let ink = back.layers.iter().find(|l| l.name == "Ink").expect("ink layer");
             let px = ink.surface().expect("ink pixels").pixel(100, 100);
@@ -529,7 +542,92 @@ fn transparent_tiff_without_channels_keeps_image_alpha() {
         let mut dec = tiff::decoder::Decoder::new(std::io::Cursor::new(r.bytes.as_slice())).unwrap();
         let extra = dec.get_tag_u16_vec(tiff::tags::Tag::ExtraSamples).unwrap();
         assert_eq!(extra, vec![2], "{layers}");
+        if layers {
+            assert_photoshop_layered_tiff(&r.bytes, false);
+        }
     }
+}
+
+/// Tag 37724 walked as raw bytes (not through [`ImageSourceData`]).
+///
+/// Matches a Photoshop 27 layered TIFF: classic 4-byte block lengths, `Layr` then a 14-byte
+/// `LMsk`, no `MTrn` (that block is only for a composite that keeps both transparency and a
+/// spot). A 4320×4320 RGB spot plate is 74_649_600 bytes and still fits those u32 lengths;
+/// this check uses the same layout on a smaller image.
+fn assert_photoshop_layered_tiff(bytes: &[u8], with_spot: bool) {
+    assert!(bytes.starts_with(b"II"), "little-endian TIFF");
+    let u16_at = |i: usize| u16::from_le_bytes([bytes[i], bytes[i + 1]]);
+    let u32_at = |i: usize| u32::from_le_bytes(bytes[i..i + 4].try_into().unwrap());
+    let ifd = u32_at(4) as usize;
+    let n = u16_at(ifd) as usize;
+    let mut layers = None;
+    let mut spp = 0u16;
+    let mut extra = Vec::new();
+    for e in 0..n {
+        let at = ifd + 2 + e * 12;
+        let tag = u16_at(at);
+        let typ = u16_at(at + 2);
+        let count = u32_at(at + 4) as usize;
+        let val = u32_at(at + 8) as usize;
+        let unit: usize = match typ {
+            3 => 2,
+            4 => 4,
+            _ => 1,
+        };
+        let size = unit.saturating_mul(count);
+        let inline = at + 8;
+        let raw = if size <= 4 { &bytes[inline..inline + size] } else { &bytes[val..val + size] };
+        match tag {
+            277 => spp = u16::from_le_bytes([raw[0], raw[1]]),
+            338 => extra = raw.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect(),
+            37724 => layers = Some(raw),
+            _ => {}
+        }
+    }
+    let isd = layers.expect("37724");
+    let sig = b"Adobe Photoshop Document Data Block\0";
+    assert!(isd.starts_with(sig), "PSB-sized lengths");
+    let mut pos = sig.len();
+    let mut keys = Vec::new();
+    let mut layr: Option<Vec<u8>> = None;
+    while pos + 12 <= isd.len() {
+        assert_eq!(&isd[pos..pos + 4], b"MIB8", "block at {pos}");
+        let key = [isd[pos + 7], isd[pos + 6], isd[pos + 5], isd[pos + 4]];
+        let len = u32::from_le_bytes(isd[pos + 8..pos + 12].try_into().unwrap()) as usize;
+        let body = &isd[pos + 12..pos + 12 + len];
+        if &key == b"Layr" {
+            layr = Some(body.to_vec());
+        }
+        if &key == b"LMsk" {
+            assert_eq!(body, &[0, 0, 0xff, 0xff, 0, 0, 0, 0, 0, 0, 0x32, 0, 0x80, 0]);
+        }
+        keys.push(key);
+        pos += 12 + len;
+        let rest = &isd[pos..];
+        let pad = (0..=3).find(|&k| k == rest.len() || rest.get(k..k + 4) == Some(b"MIB8")).unwrap_or(0);
+        pos += pad;
+    }
+    assert_eq!(pos, isd.len(), "trailing bytes after the last block");
+    assert_eq!(keys.first(), Some(b"Layr"));
+    assert_eq!(keys.get(1), Some(b"LMsk"));
+    assert!(!keys.iter().any(|k| k == b"MTrn" || k == b"Mtrn"));
+    let layr = layr.expect("Layr");
+    let count = i16::from_le_bytes([layr[0], layr[1]]);
+    if with_spot {
+        assert!(count > 0, "layer count {count}");
+        assert_eq!((spp, extra.as_slice()), (4, [0u16].as_slice()));
+    } else {
+        assert!(count < 0, "layer count {count}");
+        assert_eq!(extra, vec![2]);
+    }
+    let nch = u16::from_le_bytes([layr[18], layr[19]]) as usize;
+    let mut ids = Vec::new();
+    let mut p = 20;
+    for _ in 0..nch {
+        ids.push(i16::from_le_bytes([layr[p], layr[p + 1]]));
+        p += 6;
+    }
+    assert!(ids.contains(&-1), "channel ids {ids:?}");
 }
 
 /// Quick Mask stays the last channel after the merged transparency plane is omitted.
