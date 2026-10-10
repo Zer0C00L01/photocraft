@@ -561,6 +561,10 @@ pub struct Opened {
     pub warnings: Vec<String>,
     /// Recorded actions (`actions.json`). Empty when the file is missing or unreadable.
     pub actions: Vec<crate::actions_cmds::Action>,
+    /// Folder names from `actions.json` (version 2). Empty for a version 1 file.
+    pub action_sets: Vec<String>,
+    /// Folder of each loaded action, parallel to `actions`. Empty strings are ungrouped.
+    pub action_folders: Vec<String>,
 }
 
 /// Load a store (any thread; the desktop app does this in the background at start).
@@ -632,7 +636,7 @@ pub fn open(backend: Box<dyn PresetBackend>) -> Opened {
     }
     let (tiles, regenerated) = load_tiles(backend.as_ref(), &wanted, &tip_sizes, &info, &mut warnings);
 
-    let actions = load_actions(backend.as_ref(), &mut warnings);
+    let (actions, action_sets, action_folders) = load_actions(backend.as_ref(), &mut warnings);
     let mut store = PresetStore {
         backend,
         synced_rev: None,
@@ -688,28 +692,45 @@ pub fn open(backend: Box<dyn PresetBackend>) -> Opened {
     let hidden_builtins = index.as_ref().map(|i| i.hidden_builtins.clone()).unwrap_or_default();
     let order = index.as_ref().map(|i| i.order.clone()).unwrap_or_default();
     store.index = index;
-    Opened { store, presets, hidden_builtins, order, warnings, actions }
+    Opened { store, presets, hidden_builtins, order, warnings, actions, action_sets, action_folders }
 }
 
-/// `actions.json`: a missing file is an empty list. Anything else unreadable is a warning.
-fn load_actions(backend: &dyn PresetBackend, warnings: &mut Vec<String>) -> Vec<crate::actions_cmds::Action> {
+/// `actions.json`: a missing file is an empty list. Version 1 is a flat list (every action
+/// ungrouped). Version 2 also carries folder names. Anything else unreadable is a warning.
+fn load_actions(backend: &dyn PresetBackend, warnings: &mut Vec<String>) -> (Vec<crate::actions_cmds::Action>, Vec<String>, Vec<String>) {
+    let empty = (Vec::new(), Vec::new(), Vec::new());
     let bytes = match backend.read(ACTIONS_FILE, MAX_ACTIONS_BYTES) {
         Ok(b) => b,
-        Err(e) if missing_file(&e) => return Vec::new(),
+        Err(e) if missing_file(&e) => return empty,
         Err(e) => {
             warnings.push(format!("actions: {ACTIONS_FILE} skipped: {e}"));
-            return Vec::new();
+            return empty;
         }
     };
     match serde_json::from_slice::<crate::actions_cmds::ActionsFile>(&bytes) {
-        Ok(file) if file.version == 1 => file.actions,
+        Ok(file) if file.version == 1 || file.version == crate::actions_cmds::ACTIONS_VERSION => {
+            let crate::actions_cmds::ActionsFile { actions, mut sets, mut folders, .. } = file;
+            if folders.len() < actions.len() {
+                folders.resize(actions.len(), String::new());
+            } else if folders.len() > actions.len() {
+                folders.truncate(actions.len());
+            }
+            for folder in &folders {
+                if !folder.is_empty() && !sets.iter().any(|name| name == folder) {
+                    sets.push(folder.clone());
+                }
+            }
+            let mut seen = HashSet::new();
+            sets.retain(|name| !name.is_empty() && seen.insert(name.clone()));
+            (actions, sets, folders)
+        }
         Ok(file) => {
             warnings.push(format!("actions: {ACTIONS_FILE} skipped: unsupported version {}", file.version));
-            Vec::new()
+            empty
         }
         Err(e) => {
             warnings.push(format!("actions: {ACTIONS_FILE} skipped: {e}"));
-            Vec::new()
+            empty
         }
     }
 }
@@ -1009,11 +1030,17 @@ impl PresetStore {
     /// Write the Actions list when `rev` differs from the last load or write.
     /// An oversized list is warned once and not retried. An I/O error is warned and retried
     /// on the next command.
-    pub fn sync_actions(&mut self, list: &[crate::actions_cmds::Action], rev: u64) {
+    pub fn sync_actions(&mut self, list: &[crate::actions_cmds::Action], sets: &[String], folders: &[String], rev: u64) {
         if self.actions_rev == rev {
             return;
         }
-        let file = crate::actions_cmds::ActionsFile { version: 1, actions: list.to_vec() };
+        let mut folders = folders.to_vec();
+        if folders.len() < list.len() {
+            folders.resize(list.len(), String::new());
+        } else if folders.len() > list.len() {
+            folders.truncate(list.len());
+        }
+        let file = crate::actions_cmds::ActionsFile { version: crate::actions_cmds::ACTIONS_VERSION, actions: list.to_vec(), sets: sets.to_vec(), folders };
         let bytes = match serde_json::to_vec_pretty(&file) {
             Ok(b) => b,
             Err(e) => {
@@ -1050,7 +1077,7 @@ impl Session {
     /// built-in of the same name; presets created before the store finished loading win), hide
     /// deleted built-ins, then sync. Returns the load warnings.
     pub fn attach_preset_store(&mut self, opened: Opened) -> Vec<String> {
-        let Opened { store, presets, hidden_builtins, order, mut warnings, actions: disk } = opened;
+        let Opened { store, presets, hidden_builtins, order, mut warnings, actions: disk, action_sets: disk_sets, action_folders: disk_folders } = opened;
         let lib = &mut self.tools.presets;
         lib.retain(|p| !(p.builtin && hidden_builtins.iter().any(|h| h.eq_ignore_ascii_case(&p.name))));
         for p in presets {
@@ -1070,14 +1097,25 @@ impl Session {
         // names are appended. An empty session takes the disk list and does not rewrite it.
         if self.actions.list.is_empty() {
             self.actions.list = disk;
+            self.actions.sets = disk_sets;
+            self.actions.folders = disk_folders;
+            self.actions.align_folders();
             self.actions.rev = 1;
             if let Some(st) = self.preset_store.as_mut() {
                 st.actions_rev = 1;
             }
         } else {
-            for action in disk {
+            for (i, action) in disk.into_iter().enumerate() {
                 if !self.actions.list.iter().any(|have| have.name == action.name) {
+                    let folder = disk_folders.get(i).cloned().unwrap_or_default();
+                    self.actions.align_folders();
                     self.actions.list.push(action);
+                    self.actions.folders.push(folder);
+                }
+            }
+            for name in disk_sets {
+                if !name.is_empty() && !self.actions.sets.iter().any(|have| have == &name) {
+                    self.actions.sets.push(name);
                 }
             }
             self.actions.rev = self.actions.rev.saturating_add(1).max(1);
@@ -1103,7 +1141,7 @@ impl Session {
                 st.synced_rev = Some(rev);
                 link_stored_tips(st, &mut self.tools.brush);
             }
-            st.sync_actions(&self.actions.list, actions_rev);
+            st.sync_actions(&self.actions.list, &self.actions.sets, &self.actions.folders, actions_rev);
         }
     }
 

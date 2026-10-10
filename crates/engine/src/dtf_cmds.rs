@@ -1,12 +1,13 @@
 //! Image › DTF Spot Channel, and the built-in Actions preset "DTF".
 //!
 //! A direct-to-film print file needs a spot channel of the artwork, shrunk by a pixel so the
-//! white underbase does not peek past the colour. Photoshop's recorded action is three steps:
-//! load the active layer's transparency as the selection, contract by 1px without treating the
-//! canvas edge as a selection edge, then make a spot channel named "Spot Color 1" (RGB red,
-//! solidity 60) from that selection. [`run`] does the same work as one history step, with those
-//! values as defaults. The Actions panel preset plays the three commands so each step stays
-//! visible.
+//! white underbase does not peek past the colour. Photoshop's recorded action loads transparency,
+//! contracts by 1px without treating the canvas edge as a selection edge, then makes a spot
+//! channel named "Spot Color 1" (RGB red, solidity 60). [`run`] does that as one history step.
+//! The Actions panel preset is that same command, in a folder also named "DTF", so the step's
+//! numbers and text can be edited. The last successful settings are stored with the other
+//! remembered dialogs and become the next dialog's defaults and, while the preset is still that
+//! one step, the values Play uses.
 
 use photocraft_algo::selection::{self as sel, SelectionMode};
 use photocraft_color::Color;
@@ -19,6 +20,12 @@ use crate::{EngineError, Result, Session};
 
 /// Name of the built-in action in the Actions panel.
 pub const ACTION_NAME: &str = "DTF";
+/// Folder the built-in action is filed under.
+pub const SET_NAME: &str = "DTF";
+/// `source` value: transparency of the active layer.
+pub const SOURCE_LAYER: &str = "layer";
+/// `source` value: alpha of the composite of every visible layer.
+pub const SOURCE_COMPOSITE: &str = "composite";
 /// Contract radius, in pixels. `0` keeps the transparency mask as it is.
 pub const DEFAULT_CONTRACT: f32 = 1.0;
 pub const DEFAULT_NAME: &str = "Spot Color 1";
@@ -95,6 +102,56 @@ fn name_of(p: &Value) -> Result<String> {
     }
 }
 
+fn source_of(p: &Value) -> Result<bool> {
+    match p.get("source") {
+        None => Ok(false),
+        Some(Value::String(s)) if s == SOURCE_LAYER => Ok(false),
+        Some(Value::String(s)) if s == SOURCE_COMPOSITE => Ok(true),
+        Some(_) => Err(bad("source must be \"layer\" or \"composite\"")),
+    }
+}
+
+fn hex_color(color: Color) -> String {
+    let [r, g, b] = color.to_rgb();
+    let byte = |c: f32| (c.clamp(0.0, 1.0) * 255.0).round() as u8;
+    format!("#{:02x}{:02x}{:02x}", byte(r), byte(g), byte(b))
+}
+
+/// The dialog and the built-in action start from these values.
+pub fn default_params() -> Value {
+    json!({
+        "source": SOURCE_LAYER,
+        "contract": DEFAULT_CONTRACT,
+        "name": DEFAULT_NAME,
+        "color": DEFAULT_COLOR,
+        "solidity": DEFAULT_SOLIDITY,
+        "applyAtCanvasBounds": false,
+    })
+}
+
+/// Fields for the Image › DTF Spot Channel dialog, prefilled from the last successful run.
+pub fn dialog_fields(saved: Option<&Value>) -> Value {
+    let mut fields = default_params();
+    if let Some(saved) = saved.and_then(Value::as_object)
+        && let Some(fields_obj) = fields.as_object_mut()
+    {
+        for (key, value) in saved {
+            if key.starts_with("__") {
+                continue;
+            }
+            fields_obj.insert(key.clone(), value.clone());
+        }
+        let source = fields_obj.get("source").and_then(Value::as_str).unwrap_or("");
+        if source != SOURCE_LAYER && source != SOURCE_COMPOSITE {
+            fields_obj.insert("source".into(), json!(SOURCE_LAYER));
+        }
+        if !fields_obj.get("applyAtCanvasBounds").is_some_and(Value::is_boolean) {
+            fields_obj.insert("applyAtCanvasBounds".into(), json!(false));
+        }
+    }
+    fields
+}
+
 /// Active-layer transparency over the canvas: 0 where the layer is clear, 1 where a layer
 /// without pixels (an adjustment or fill) covers the canvas.
 fn transparency(doc: &photocraft_doc::Document, layer: photocraft_doc::LayerId, n: usize) -> Result<Vec<f32>> {
@@ -110,7 +167,17 @@ fn transparency(doc: &photocraft_doc::Document, layer: photocraft_doc::LayerId, 
     }
 }
 
+/// Alpha of the flattened visible document. Hidden layers are left out.
+fn composite_alpha(doc: &photocraft_doc::Document, n: usize) -> Result<Vec<f32>> {
+    let buf = photocraft_compose::flatten(doc);
+    if buf.px.len() != n {
+        return Err(bad("the composite does not cover the canvas"));
+    }
+    Ok(buf.px.into_iter().map(|p| p[3]).collect())
+}
+
 fn run(s: &mut Session, p: &Value) -> Result<Value> {
+    let composite = source_of(p)?;
     let contract = number(p, "contract")?.unwrap_or(f64::from(DEFAULT_CONTRACT)) as f32;
     if !(0.0..=MAX_CONTRACT).contains(&contract) {
         return Err(bad(format!("contract must be a number in 0..={MAX_CONTRACT}")));
@@ -125,11 +192,15 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
     let at_bounds = flag(p, "applyAtCanvasBounds", false)?;
 
     let i = s.edit("DTF Spot Channel", |doc, active| {
-        let id = active.ok_or_else(|| EngineError::Other("transparency needs a layer".into()))?;
         let area = doc.bounds();
         let (w, h) = (area.width() as usize, area.height() as usize);
         let n = w.checked_mul(h).ok_or_else(|| bad("the canvas is too large"))?;
-        let mut mask = transparency(doc, id, n)?;
+        let mut mask = if composite {
+            composite_alpha(doc, n)?
+        } else {
+            let id = active.ok_or_else(|| EngineError::Other("transparency needs a layer".into()))?;
+            transparency(doc, id, n)?
+        };
         if contract > 0.0 {
             mask = crate::selection_cmds::modify_mask(&mask, w, h, "contract", contract, at_bounds).map_err(bad)?;
         }
@@ -147,28 +218,103 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
         crate::channel_cmds::touch(st);
     }
     let selected = s.active().is_some_and(|st| st.doc.selection.is_some());
-    Ok(json!({ "channel": i, "name": name, "solidity": solidity_pct, "selected": selected }))
+    let params = json!({
+        "source": if composite { SOURCE_COMPOSITE } else { SOURCE_LAYER },
+        "contract": contract,
+        "name": name,
+        "color": hex_color(color),
+        "solidity": solidity_pct,
+        "applyAtCanvasBounds": at_bounds,
+    });
+    remember(s, params);
+    Ok(json!({ "channel": i, "name": name, "solidity": solidity_pct, "selected": selected, "source": if composite { SOURCE_COMPOSITE } else { SOURCE_LAYER } }))
 }
 
-/// The three-step action from the DTF set, with the screenshot's values.
-pub fn builtin_action() -> Action {
-    Action {
-        name: ACTION_NAME.into(),
-        steps: vec![
-            ("select.loadSelection".into(), json!({"channel": "transparency"})),
-            ("select.modify.contract".into(), json!({"radius": 1, "applyAtCanvasBounds": false})),
-            ("channel.newSpot".into(), json!({"name": DEFAULT_NAME, "color": DEFAULT_COLOR, "solidity": DEFAULT_SOLIDITY, "fromSelection": true})),
-        ],
+fn remember(s: &mut Session, params: Value) {
+    s.edit_prefs(|prefs| {
+        prefs.dialogs.insert(CMD.into(), params.clone());
+    });
+    let idx = s.actions.list.iter().position(|a| a.name == ACTION_NAME && a.steps.len() == 1 && a.steps.first().is_some_and(|(id, _)| id == CMD));
+    if let Some(idx) = idx
+        && let Some(step) = s.actions.list.get_mut(idx).and_then(|a| a.steps.first_mut())
+    {
+        step.1 = params;
+        s.actions.touch();
     }
+}
+
+/// The Actions panel edited the DTF step: the next dialog should open on those values.
+pub fn note_edited_step(s: &mut Session, idx: usize) {
+    let Some(action) = s.actions.list.get(idx) else { return };
+    if action.name != ACTION_NAME || action.steps.len() != 1 {
+        return;
+    }
+    let Some((id, params)) = action.steps.first() else { return };
+    if id != CMD {
+        return;
+    }
+    let params = params.clone();
+    s.edit_prefs(|prefs| {
+        prefs.dialogs.insert(CMD.into(), params);
+    });
+}
+
+fn params_for_preset(s: &Session) -> Value {
+    dialog_fields(s.prefs().dialogs.get(CMD))
+}
+
+/// The one-step action, with the screenshot's values, filed in the DTF folder.
+pub fn builtin_action() -> Action {
+    Action { name: ACTION_NAME.into(), steps: vec![(CMD.into(), default_params())] }
+}
+
+/// The previous preset was the three Photoshop commands. Fold those into one `image.dtf` step,
+/// keeping the contract, name, colour and solidity they recorded.
+fn legacy_params(action: &Action) -> Option<Value> {
+    if action.steps.len() != 3 {
+        return None;
+    }
+    let (load, contract, spot) = (&action.steps[0], &action.steps[1], &action.steps[2]);
+    if load.0 != "select.loadSelection" || contract.0 != "select.modify.contract" || spot.0 != "channel.newSpot" {
+        return None;
+    }
+    if load.1.get("channel").and_then(Value::as_str) != Some("transparency") {
+        return None;
+    }
+    let mut params = default_params();
+    let obj = params.as_object_mut()?;
+    if let Some(radius) = contract.1.get("radius") {
+        obj.insert("contract".into(), radius.clone());
+    }
+    if let Some(at) = contract.1.get("applyAtCanvasBounds") {
+        obj.insert("applyAtCanvasBounds".into(), at.clone());
+    }
+    for key in ["name", "color", "solidity"] {
+        if let Some(v) = spot.1.get(key) {
+            obj.insert(key.into(), v.clone());
+        }
+    }
+    Some(params)
 }
 
 /// Append the built-in DTF action when the list doesn't already contain that name.
+/// A saved three-step DTF preset becomes the one `image.dtf` step, in the DTF folder.
 pub fn ensure_preset(s: &mut Session) {
-    if s.actions.list.iter().any(|a| a.name == ACTION_NAME) {
+    s.actions.align_folders();
+    if let Some(idx) = s.actions.list.iter().position(|a| a.name == ACTION_NAME) {
+        if let Some(params) = legacy_params(&s.actions.list[idx]) {
+            s.actions.list[idx].steps = vec![(CMD.into(), params)];
+            if s.actions.folder(idx).is_empty() {
+                s.actions.folders[idx] = SET_NAME.into();
+            }
+            let _ = crate::actions_cmds::ensure_set(&mut s.actions, SET_NAME);
+            s.actions.touch();
+        }
         return;
     }
-    s.actions.list.push(builtin_action());
-    s.actions.touch();
+    let params = params_for_preset(s);
+    let action = Action { name: ACTION_NAME.into(), steps: vec![(CMD.into(), params)] };
+    let _ = crate::actions_cmds::push_action(s, action, SET_NAME);
 }
 
 pub fn specs() -> Vec<CommandSpec> {
@@ -177,7 +323,7 @@ pub fn specs() -> Vec<CommandSpec> {
         label: "DTF Spot Channel…",
         menu: &["Image"],
         shortcut: None,
-        params: r##"{"contract":0..500=1,"name":str="Spot Color 1","color":"#rrggbb"|[r,g,b]="#ff0000","solidity":0..100=60,"applyAtCanvasBounds":bool=false} → {channel,name,solidity,selected}"##,
+        params: r##"{"source":"layer"|"composite"="layer","contract":0..500=1,"name":str="Spot Color 1","color":"#rrggbb"|[r,g,b]="#ff0000","solidity":0..100=60,"applyAtCanvasBounds":bool=false} → {channel,name,solidity,selected,source}. source "layer" is the active layer; "composite" is every visible layer. The values used are remembered for the next dialog and, while the DTF preset is still this one step, for Actions playback."##,
         enabled,
         journal: true,
         run,
@@ -291,6 +437,8 @@ mod tests {
             json!({"name": ""}),
             json!({"name": 3}),
             json!({"applyAtCanvasBounds": "no"}),
+            json!({"source": "both"}),
+            json!({"source": 1}),
         ] {
             assert!(s.execute(CMD, p.clone()).is_err(), "should reject {p}");
         }
@@ -309,6 +457,9 @@ mod tests {
         let mut via_action = Session::new();
         prep(&mut via_action);
         ensure_preset(&mut via_action);
+        assert_eq!(via_action.actions.folder(0), SET_NAME);
+        assert_eq!(via_action.actions.list[0].steps.len(), 1);
+        assert_eq!(via_action.actions.list[0].steps[0].0, CMD);
         via_action.execute("actions.play", json!({"action": ACTION_NAME})).unwrap();
         let a = &via_cmd.active().unwrap().doc.channels[0];
         let b = &via_action.active().unwrap().doc.channels[0];
@@ -346,5 +497,96 @@ mod tests {
             assert!((sol - 0.6).abs() < 1e-4, "{name}");
             assert_eq!(ch.surface.to_interleaved(area), doc.channels[0].surface.to_interleaved(area), "{name}");
         }
+    }
+
+    #[test]
+    fn composite_includes_every_visible_layer_and_skips_hidden_ones() {
+        let prep = || {
+            let mut s = Session::new();
+            s.execute("file.new", json!({"width": 8, "height": 8, "background": "transparent"})).unwrap();
+            paint_rect(&mut s, Rect::new(1, 1, 4, 4));
+            let bottom = s.active().unwrap().doc.layers[0].id;
+            s.execute("layer.new.layer", json!({})).unwrap();
+            paint_rect(&mut s, Rect::new(4, 4, 7, 7));
+            (s, bottom)
+        };
+        let (mut layer, _) = prep();
+        layer.execute(CMD, json!({"contract": 0, "source": "layer", "name": "Layer"})).unwrap();
+        assert_eq!(channel_at(&layer, 1, 1), 0.0, "the active layer does not cover the lower layer");
+        assert_eq!(channel_at(&layer, 4, 4), 1.0);
+        assert_eq!(layer.execute(CMD, json!({})).unwrap()["source"], "layer");
+
+        let (mut both, bottom) = prep();
+        both.execute(CMD, json!({"contract": 0, "source": "composite", "name": "Both"})).unwrap();
+        assert_eq!(channel_at(&both, 1, 1), 1.0, "the lower layer is part of the composite");
+        assert_eq!(channel_at(&both, 5, 5), 1.0);
+        assert_eq!(channel_at(&both, 0, 0), 0.0);
+
+        both.execute("channel.delete", json!({"channel": "Both"})).unwrap();
+        both.execute("layer.setProps", json!({"layer": bottom.0, "visible": false})).unwrap();
+        both.execute(CMD, json!({"contract": 0, "source": "composite", "name": "Top"})).unwrap();
+        assert_eq!(channel_at(&both, 1, 1), 0.0, "a hidden layer is not in the composite");
+        assert_eq!(channel_at(&both, 4, 4), 1.0);
+    }
+
+    #[test]
+    fn last_settings_prefill_the_dialog_and_the_action() {
+        let mut s = Session::new();
+        s.execute("file.new", json!({"width": 6, "height": 6, "background": "transparent"})).unwrap();
+        paint_rect(&mut s, Rect::new(1, 1, 5, 5));
+        ensure_preset(&mut s);
+        s.execute(CMD, json!({"contract": 0, "name": "Varnish", "color": "#00ff00", "solidity": 40, "source": "composite", "applyAtCanvasBounds": true})).unwrap();
+        let saved = s.prefs().dialogs.get(CMD).expect("remembered");
+        assert_eq!(saved["name"], "Varnish");
+        assert_eq!(saved["source"], "composite");
+        assert_eq!(saved["solidity"], json!(40.0));
+        assert_eq!(saved["color"], "#00ff00");
+        assert_eq!(saved["applyAtCanvasBounds"], json!(true));
+        let fields = dialog_fields(Some(saved));
+        assert_eq!(fields["name"], "Varnish");
+        assert_eq!(fields["source"], "composite");
+        assert_eq!(s.actions.list[0].steps[0].1["name"], "Varnish");
+        assert_eq!(s.actions.list[0].steps[0].1["contract"], json!(0.0));
+
+        s.execute("file.new", json!({"width": 6, "height": 6, "background": "transparent"})).unwrap();
+        paint_rect(&mut s, Rect::new(0, 0, 6, 6));
+        s.execute("actions.play", json!({"action": ACTION_NAME})).unwrap();
+        let ch = s.active().unwrap().doc.channels.last().unwrap();
+        assert_eq!(ch.name, "Varnish");
+        assert!((ch.spot.unwrap().1 - 0.4).abs() < 1e-5);
+        // Contract 0 on a full-canvas opaque layer keeps the edge.
+        assert_eq!(channel_at(&s, 0, 0), 1.0);
+
+        s.execute("actions.setStep", json!({"action": ACTION_NAME, "step": 0, "params": {"contract": 2, "name": "Gloss", "source": "layer", "solidity": 60, "color": "#ff0000", "applyAtCanvasBounds": false}})).unwrap();
+        assert_eq!(s.prefs().dialogs.get(CMD).unwrap()["name"], "Gloss");
+        assert_eq!(s.actions.list[0].steps[0].1["contract"], json!(2));
+    }
+
+    #[test]
+    fn a_saved_three_step_preset_becomes_one_dtf_step_in_the_folder() {
+        let mut s = Session::new();
+        s.actions.list.push(Action {
+            name: ACTION_NAME.into(),
+            steps: vec![
+                ("select.loadSelection".into(), json!({"channel": "transparency"})),
+                ("select.modify.contract".into(), json!({"radius": 2, "applyAtCanvasBounds": true})),
+                ("channel.newSpot".into(), json!({"name": "White", "color": "#ffffff", "solidity": 80, "fromSelection": true})),
+            ],
+        });
+        ensure_preset(&mut s);
+        assert_eq!(s.actions.list.len(), 1);
+        assert_eq!(s.actions.folder(0), SET_NAME);
+        assert!(s.actions.sets.iter().any(|n| n == SET_NAME));
+        assert_eq!(s.actions.list[0].steps.len(), 1);
+        assert_eq!(s.actions.list[0].steps[0].0, CMD);
+        assert_eq!(s.actions.list[0].steps[0].1["name"], "White");
+        assert_eq!(s.actions.list[0].steps[0].1["contract"], json!(2));
+        assert_eq!(s.actions.list[0].steps[0].1["applyAtCanvasBounds"], json!(true));
+        // A customized action that is no longer those three commands is left in place.
+        s.actions.list[0].steps.push(("layer.new.layer".into(), json!({})));
+        s.actions.folders[0].clear();
+        ensure_preset(&mut s);
+        assert_eq!(s.actions.list[0].steps.len(), 2);
+        assert!(s.actions.folder(0).is_empty());
     }
 }

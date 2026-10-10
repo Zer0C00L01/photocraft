@@ -34,7 +34,7 @@ fn roundtrip(doc: &Document) -> Document {
     // The TIFF is a plain image to any other reader: the composite at the document's size.
     let flat = photocraft_codecs::decode(&r.bytes).expect("flat decode");
     assert_eq!(flat.dimensions(), (doc.size.width, doc.size.height));
-    // Extra alpha channels and a Quick Mask travel as TIFF extra samples (at most four).
+    // Extra alpha channels and a Quick Mask travel as TIFF extra samples (at most MAX_EXTRA_SAMPLES).
     let extra = doc.channels.len() + usize::from(doc.quick_mask.is_some());
     assert!(!r.warnings.iter().any(|w| w.contains("not written")), "{:?}", r.warnings);
     if extra > 0 && extra <= photocraft_codecs::MAX_EXTRA_SAMPLES {

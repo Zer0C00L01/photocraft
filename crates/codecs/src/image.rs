@@ -134,7 +134,9 @@ pub struct Metadata {
 }
 
 /// How many extra TIFF samples an encoded file may carry. Decoders keep at most this many.
-pub const MAX_EXTRA_SAMPLES: usize = 4;
+/// Sixteen covers a UV-DTF stack (white, varnish, gloss, primer, and further spots) without
+/// approaching the PSD 56-channel limit.
+pub const MAX_EXTRA_SAMPLES: usize = 16;
 
 /// One TIFF extra sample (a spot channel or an alpha channel that is not the image alpha).
 #[derive(Debug, Clone, PartialEq)]

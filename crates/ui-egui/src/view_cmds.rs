@@ -1056,18 +1056,16 @@ fn front(app: &mut PhotocraftApp, id: &str, params: &Value) -> Option<Result<Val
                 ),
             }
         }
-        "image.dtf" => dialog(
-            app,
-            json!({
-                "__note": "Loads the active layer's transparency, contracts that selection, and fills a new spot channel. Save as PSD or TIFF so the RIP keeps the spot.",
-                "contract": photocraft_engine::dtf_cmds::DEFAULT_CONTRACT as i64,
-                "name": photocraft_engine::dtf_cmds::DEFAULT_NAME,
-                "color": photocraft_engine::dtf_cmds::DEFAULT_COLOR,
-                "solidity": photocraft_engine::dtf_cmds::DEFAULT_SOLIDITY as i64,
-                "applyAtCanvasBounds": false,
-            }),
-            Value::Null,
-        ),
+        "image.dtf" => {
+            let mut fields = photocraft_engine::dtf_cmds::dialog_fields(app.session.prefs().dialogs.get("image.dtf"));
+            if let Some(obj) = fields.as_object_mut() {
+                obj.insert(
+                    "__note".into(),
+                    json!("Builds a spot channel from the active layer, or from every visible layer. The selection is contracted, then the spot is filled. These settings are kept for the next dialog and for the DTF action. Save as PSD or TIFF so the RIP keeps the spot."),
+                );
+            }
+            dialog(app, fields, json!({"source": ["layer", "composite"]}))
+        }
         _ => None,
     }
 }

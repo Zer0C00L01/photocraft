@@ -1188,79 +1188,87 @@ custom_colortype!(GrayA32F, f32, PI::BlackIsZero, &[32, 32], &[SampleFormat::IEE
 custom_colortype!(CmykA16, u16, PI::CMYK, &[16; 5], &[SampleFormat::Uint; 5], int);
 custom_colortype!(CmykA32F, f32, PI::CMYK, &[32; 5], &[SampleFormat::IEEEFP; 5], float);
 
-// Colour types with 1..=4 trailing extra samples (spot channels, extra alpha).
-custom_colortype!(Gray8E1, u8, PI::BlackIsZero, &[8u16; 2], &[SampleFormat::Uint; 2], int);
-custom_colortype!(Gray8E2, u8, PI::BlackIsZero, &[8u16; 3], &[SampleFormat::Uint; 3], int);
-custom_colortype!(Gray8E3, u8, PI::BlackIsZero, &[8u16; 4], &[SampleFormat::Uint; 4], int);
-custom_colortype!(Gray8E4, u8, PI::BlackIsZero, &[8u16; 5], &[SampleFormat::Uint; 5], int);
-custom_colortype!(Gray16E1, u16, PI::BlackIsZero, &[16u16; 2], &[SampleFormat::Uint; 2], int);
-custom_colortype!(Gray16E2, u16, PI::BlackIsZero, &[16u16; 3], &[SampleFormat::Uint; 3], int);
-custom_colortype!(Gray16E3, u16, PI::BlackIsZero, &[16u16; 4], &[SampleFormat::Uint; 4], int);
-custom_colortype!(Gray16E4, u16, PI::BlackIsZero, &[16u16; 5], &[SampleFormat::Uint; 5], int);
-custom_colortype!(Gray32FE1, f32, PI::BlackIsZero, &[32u16; 2], &[SampleFormat::IEEEFP; 2], float);
-custom_colortype!(Gray32FE2, f32, PI::BlackIsZero, &[32u16; 3], &[SampleFormat::IEEEFP; 3], float);
-custom_colortype!(Gray32FE3, f32, PI::BlackIsZero, &[32u16; 4], &[SampleFormat::IEEEFP; 4], float);
-custom_colortype!(Gray32FE4, f32, PI::BlackIsZero, &[32u16; 5], &[SampleFormat::IEEEFP; 5], float);
-custom_colortype!(GrayA8E1, u8, PI::BlackIsZero, &[8u16; 3], &[SampleFormat::Uint; 3], int);
-custom_colortype!(GrayA8E2, u8, PI::BlackIsZero, &[8u16; 4], &[SampleFormat::Uint; 4], int);
-custom_colortype!(GrayA8E3, u8, PI::BlackIsZero, &[8u16; 5], &[SampleFormat::Uint; 5], int);
-custom_colortype!(GrayA8E4, u8, PI::BlackIsZero, &[8u16; 6], &[SampleFormat::Uint; 6], int);
-custom_colortype!(GrayA16E1, u16, PI::BlackIsZero, &[16u16; 3], &[SampleFormat::Uint; 3], int);
-custom_colortype!(GrayA16E2, u16, PI::BlackIsZero, &[16u16; 4], &[SampleFormat::Uint; 4], int);
-custom_colortype!(GrayA16E3, u16, PI::BlackIsZero, &[16u16; 5], &[SampleFormat::Uint; 5], int);
-custom_colortype!(GrayA16E4, u16, PI::BlackIsZero, &[16u16; 6], &[SampleFormat::Uint; 6], int);
-custom_colortype!(GrayA32FE1, f32, PI::BlackIsZero, &[32u16; 3], &[SampleFormat::IEEEFP; 3], float);
-custom_colortype!(GrayA32FE2, f32, PI::BlackIsZero, &[32u16; 4], &[SampleFormat::IEEEFP; 4], float);
-custom_colortype!(GrayA32FE3, f32, PI::BlackIsZero, &[32u16; 5], &[SampleFormat::IEEEFP; 5], float);
-custom_colortype!(GrayA32FE4, f32, PI::BlackIsZero, &[32u16; 6], &[SampleFormat::IEEEFP; 6], float);
-custom_colortype!(Rgb8E1, u8, PI::RGB, &[8u16; 4], &[SampleFormat::Uint; 4], int);
-custom_colortype!(Rgb8E2, u8, PI::RGB, &[8u16; 5], &[SampleFormat::Uint; 5], int);
-custom_colortype!(Rgb8E3, u8, PI::RGB, &[8u16; 6], &[SampleFormat::Uint; 6], int);
-custom_colortype!(Rgb8E4, u8, PI::RGB, &[8u16; 7], &[SampleFormat::Uint; 7], int);
-custom_colortype!(Rgb16E1, u16, PI::RGB, &[16u16; 4], &[SampleFormat::Uint; 4], int);
-custom_colortype!(Rgb16E2, u16, PI::RGB, &[16u16; 5], &[SampleFormat::Uint; 5], int);
-custom_colortype!(Rgb16E3, u16, PI::RGB, &[16u16; 6], &[SampleFormat::Uint; 6], int);
-custom_colortype!(Rgb16E4, u16, PI::RGB, &[16u16; 7], &[SampleFormat::Uint; 7], int);
-custom_colortype!(Rgb32FE1, f32, PI::RGB, &[32u16; 4], &[SampleFormat::IEEEFP; 4], float);
-custom_colortype!(Rgb32FE2, f32, PI::RGB, &[32u16; 5], &[SampleFormat::IEEEFP; 5], float);
-custom_colortype!(Rgb32FE3, f32, PI::RGB, &[32u16; 6], &[SampleFormat::IEEEFP; 6], float);
-custom_colortype!(Rgb32FE4, f32, PI::RGB, &[32u16; 7], &[SampleFormat::IEEEFP; 7], float);
-custom_colortype!(Rgba8E1, u8, PI::RGB, &[8u16; 5], &[SampleFormat::Uint; 5], int);
-custom_colortype!(Rgba8E2, u8, PI::RGB, &[8u16; 6], &[SampleFormat::Uint; 6], int);
-custom_colortype!(Rgba8E3, u8, PI::RGB, &[8u16; 7], &[SampleFormat::Uint; 7], int);
-custom_colortype!(Rgba8E4, u8, PI::RGB, &[8u16; 8], &[SampleFormat::Uint; 8], int);
-custom_colortype!(Rgba16E1, u16, PI::RGB, &[16u16; 5], &[SampleFormat::Uint; 5], int);
-custom_colortype!(Rgba16E2, u16, PI::RGB, &[16u16; 6], &[SampleFormat::Uint; 6], int);
-custom_colortype!(Rgba16E3, u16, PI::RGB, &[16u16; 7], &[SampleFormat::Uint; 7], int);
-custom_colortype!(Rgba16E4, u16, PI::RGB, &[16u16; 8], &[SampleFormat::Uint; 8], int);
-custom_colortype!(Rgba32FE1, f32, PI::RGB, &[32u16; 5], &[SampleFormat::IEEEFP; 5], float);
-custom_colortype!(Rgba32FE2, f32, PI::RGB, &[32u16; 6], &[SampleFormat::IEEEFP; 6], float);
-custom_colortype!(Rgba32FE3, f32, PI::RGB, &[32u16; 7], &[SampleFormat::IEEEFP; 7], float);
-custom_colortype!(Rgba32FE4, f32, PI::RGB, &[32u16; 8], &[SampleFormat::IEEEFP; 8], float);
-custom_colortype!(Cmyk8E1, u8, PI::CMYK, &[8u16; 5], &[SampleFormat::Uint; 5], int);
-custom_colortype!(Cmyk8E2, u8, PI::CMYK, &[8u16; 6], &[SampleFormat::Uint; 6], int);
-custom_colortype!(Cmyk8E3, u8, PI::CMYK, &[8u16; 7], &[SampleFormat::Uint; 7], int);
-custom_colortype!(Cmyk8E4, u8, PI::CMYK, &[8u16; 8], &[SampleFormat::Uint; 8], int);
-custom_colortype!(Cmyk16E1, u16, PI::CMYK, &[16u16; 5], &[SampleFormat::Uint; 5], int);
-custom_colortype!(Cmyk16E2, u16, PI::CMYK, &[16u16; 6], &[SampleFormat::Uint; 6], int);
-custom_colortype!(Cmyk16E3, u16, PI::CMYK, &[16u16; 7], &[SampleFormat::Uint; 7], int);
-custom_colortype!(Cmyk16E4, u16, PI::CMYK, &[16u16; 8], &[SampleFormat::Uint; 8], int);
-custom_colortype!(Cmyk32FE1, f32, PI::CMYK, &[32u16; 5], &[SampleFormat::IEEEFP; 5], float);
-custom_colortype!(Cmyk32FE2, f32, PI::CMYK, &[32u16; 6], &[SampleFormat::IEEEFP; 6], float);
-custom_colortype!(Cmyk32FE3, f32, PI::CMYK, &[32u16; 7], &[SampleFormat::IEEEFP; 7], float);
-custom_colortype!(Cmyk32FE4, f32, PI::CMYK, &[32u16; 8], &[SampleFormat::IEEEFP; 8], float);
-custom_colortype!(CmykA8E1, u8, PI::CMYK, &[8u16; 6], &[SampleFormat::Uint; 6], int);
-custom_colortype!(CmykA8E2, u8, PI::CMYK, &[8u16; 7], &[SampleFormat::Uint; 7], int);
-custom_colortype!(CmykA8E3, u8, PI::CMYK, &[8u16; 8], &[SampleFormat::Uint; 8], int);
-custom_colortype!(CmykA8E4, u8, PI::CMYK, &[8u16; 9], &[SampleFormat::Uint; 9], int);
-custom_colortype!(CmykA16E1, u16, PI::CMYK, &[16u16; 6], &[SampleFormat::Uint; 6], int);
-custom_colortype!(CmykA16E2, u16, PI::CMYK, &[16u16; 7], &[SampleFormat::Uint; 7], int);
-custom_colortype!(CmykA16E3, u16, PI::CMYK, &[16u16; 8], &[SampleFormat::Uint; 8], int);
-custom_colortype!(CmykA16E4, u16, PI::CMYK, &[16u16; 9], &[SampleFormat::Uint; 9], int);
-custom_colortype!(CmykA32FE1, f32, PI::CMYK, &[32u16; 6], &[SampleFormat::IEEEFP; 6], float);
-custom_colortype!(CmykA32FE2, f32, PI::CMYK, &[32u16; 7], &[SampleFormat::IEEEFP; 7], float);
-custom_colortype!(CmykA32FE3, f32, PI::CMYK, &[32u16; 8], &[SampleFormat::IEEEFP; 8], float);
-custom_colortype!(CmykA32FE4, f32, PI::CMYK, &[32u16; 9], &[SampleFormat::IEEEFP; 9], float);
+// Colour types with 1..=MAX_EXTRA_SAMPLES trailing extra samples (spot channels, extra alpha).
+// One generic type per (sample, photometric, bit depth, total sample count) instead of a
+// hand-written type for every layout. `N` is the total sample count, not the extra count.
+const fn extra_photo(v: u16) -> PhotometricInterpretation {
+    match v {
+        1 => PhotometricInterpretation::BlackIsZero,
+        2 => PhotometricInterpretation::RGB,
+        5 => PhotometricInterpretation::CMYK,
+        _ => PhotometricInterpretation::RGB,
+    }
+}
+
+trait ExtraKind: Copy + TiffValue + 'static {
+    const FORMAT: SampleFormat;
+    fn predict(row: &[Self], out: &mut Vec<Self>, samples: usize);
+}
+
+impl ExtraKind for u8 {
+    const FORMAT: SampleFormat = SampleFormat::Uint;
+    fn predict(row: &[Self], out: &mut Vec<Self>, samples: usize) {
+        let n = samples.min(row.len());
+        out.extend_from_slice(&row[..n]);
+        out.extend(row.iter().zip(&row[n..]).map(|(prev, current)| current.wrapping_sub(*prev)));
+    }
+}
+
+impl ExtraKind for u16 {
+    const FORMAT: SampleFormat = SampleFormat::Uint;
+    fn predict(row: &[Self], out: &mut Vec<Self>, samples: usize) {
+        let n = samples.min(row.len());
+        out.extend_from_slice(&row[..n]);
+        out.extend(row.iter().zip(&row[n..]).map(|(prev, current)| current.wrapping_sub(*prev)));
+    }
+}
+
+impl ExtraKind for f32 {
+    const FORMAT: SampleFormat = SampleFormat::IEEEFP;
+    fn predict(row: &[Self], out: &mut Vec<Self>, _samples: usize) {
+        out.extend_from_slice(row);
+    }
+}
+
+struct Extras<T, const PHOTO: u16, const BITS: u16, const N: usize>(std::marker::PhantomData<T>);
+
+impl<T, const PHOTO: u16, const BITS: u16, const N: usize> TiffColorType for Extras<T, PHOTO, BITS, N>
+where
+    T: ExtraKind,
+{
+    type Inner = T;
+    const TIFF_VALUE: PhotometricInterpretation = extra_photo(PHOTO);
+    const BITS_PER_SAMPLE: &'static [u16] = &[BITS; N];
+    const SAMPLE_FORMAT: &'static [SampleFormat] = &[T::FORMAT; N];
+    fn horizontal_predict(row: &[Self::Inner], result: &mut Vec<Self::Inner>) {
+        T::predict(row, result, N);
+    }
+}
+
+macro_rules! write_extras {
+    ($n:expr, $enc:expr, $w:expr, $h:expr, $data:expr, $tags:expr, $sample:ty, $photo:literal, $bits:literal, $base:literal) => {
+        match $n {
+            1 => write_one::<Extras<$sample, $photo, $bits, { $base + 1 }>, K>($enc, $w, $h, $data, $tags),
+            2 => write_one::<Extras<$sample, $photo, $bits, { $base + 2 }>, K>($enc, $w, $h, $data, $tags),
+            3 => write_one::<Extras<$sample, $photo, $bits, { $base + 3 }>, K>($enc, $w, $h, $data, $tags),
+            4 => write_one::<Extras<$sample, $photo, $bits, { $base + 4 }>, K>($enc, $w, $h, $data, $tags),
+            5 => write_one::<Extras<$sample, $photo, $bits, { $base + 5 }>, K>($enc, $w, $h, $data, $tags),
+            6 => write_one::<Extras<$sample, $photo, $bits, { $base + 6 }>, K>($enc, $w, $h, $data, $tags),
+            7 => write_one::<Extras<$sample, $photo, $bits, { $base + 7 }>, K>($enc, $w, $h, $data, $tags),
+            8 => write_one::<Extras<$sample, $photo, $bits, { $base + 8 }>, K>($enc, $w, $h, $data, $tags),
+            9 => write_one::<Extras<$sample, $photo, $bits, { $base + 9 }>, K>($enc, $w, $h, $data, $tags),
+            10 => write_one::<Extras<$sample, $photo, $bits, { $base + 10 }>, K>($enc, $w, $h, $data, $tags),
+            11 => write_one::<Extras<$sample, $photo, $bits, { $base + 11 }>, K>($enc, $w, $h, $data, $tags),
+            12 => write_one::<Extras<$sample, $photo, $bits, { $base + 12 }>, K>($enc, $w, $h, $data, $tags),
+            13 => write_one::<Extras<$sample, $photo, $bits, { $base + 13 }>, K>($enc, $w, $h, $data, $tags),
+            14 => write_one::<Extras<$sample, $photo, $bits, { $base + 14 }>, K>($enc, $w, $h, $data, $tags),
+            15 => write_one::<Extras<$sample, $photo, $bits, { $base + 15 }>, K>($enc, $w, $h, $data, $tags),
+            16 => write_one::<Extras<$sample, $photo, $bits, { $base + 16 }>, K>($enc, $w, $h, $data, $tags),
+            other => Err(io::Error::new(io::ErrorKind::InvalidInput, format!("unsupported extra samples ({other})")).into()),
+        }
+    };
+}
+
 
 
 fn bytes_as_u16(b: &[u8]) -> Vec<u16> {
@@ -1316,79 +1324,61 @@ fn write_with_extras<K: TiffKind>(enc: &mut TiffEncoder<&mut Cursor<Vec<u8>>, K>
     let bytes = interleave_extras(img).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     let (w, h) = img.dimensions();
     let n = img.meta.extra_samples.len();
-    match (img.layout(), img.sample_type(), n) {
-        (L::Gray, S::U8, 1) => write_one::<Gray8E1, K>(enc, w, h, &bytes, tags),
-        (L::Gray, S::U8, 2) => write_one::<Gray8E2, K>(enc, w, h, &bytes, tags),
-        (L::Gray, S::U8, 3) => write_one::<Gray8E3, K>(enc, w, h, &bytes, tags),
-        (L::Gray, S::U8, 4) => write_one::<Gray8E4, K>(enc, w, h, &bytes, tags),
-        (L::Gray, S::U16, 1) => { let v = bytes_as_u16(&bytes); write_one::<Gray16E1, K>(enc, w, h, &v, tags) }
-        (L::Gray, S::U16, 2) => { let v = bytes_as_u16(&bytes); write_one::<Gray16E2, K>(enc, w, h, &v, tags) }
-        (L::Gray, S::U16, 3) => { let v = bytes_as_u16(&bytes); write_one::<Gray16E3, K>(enc, w, h, &v, tags) }
-        (L::Gray, S::U16, 4) => { let v = bytes_as_u16(&bytes); write_one::<Gray16E4, K>(enc, w, h, &v, tags) }
-        (L::Gray, S::F32, 1) => { let v = bytes_as_f32(&bytes); write_one::<Gray32FE1, K>(enc, w, h, &v, tags) }
-        (L::Gray, S::F32, 2) => { let v = bytes_as_f32(&bytes); write_one::<Gray32FE2, K>(enc, w, h, &v, tags) }
-        (L::Gray, S::F32, 3) => { let v = bytes_as_f32(&bytes); write_one::<Gray32FE3, K>(enc, w, h, &v, tags) }
-        (L::Gray, S::F32, 4) => { let v = bytes_as_f32(&bytes); write_one::<Gray32FE4, K>(enc, w, h, &v, tags) }
-        (L::GrayA, S::U8, 1) => write_one::<GrayA8E1, K>(enc, w, h, &bytes, tags),
-        (L::GrayA, S::U8, 2) => write_one::<GrayA8E2, K>(enc, w, h, &bytes, tags),
-        (L::GrayA, S::U8, 3) => write_one::<GrayA8E3, K>(enc, w, h, &bytes, tags),
-        (L::GrayA, S::U8, 4) => write_one::<GrayA8E4, K>(enc, w, h, &bytes, tags),
-        (L::GrayA, S::U16, 1) => { let v = bytes_as_u16(&bytes); write_one::<GrayA16E1, K>(enc, w, h, &v, tags) }
-        (L::GrayA, S::U16, 2) => { let v = bytes_as_u16(&bytes); write_one::<GrayA16E2, K>(enc, w, h, &v, tags) }
-        (L::GrayA, S::U16, 3) => { let v = bytes_as_u16(&bytes); write_one::<GrayA16E3, K>(enc, w, h, &v, tags) }
-        (L::GrayA, S::U16, 4) => { let v = bytes_as_u16(&bytes); write_one::<GrayA16E4, K>(enc, w, h, &v, tags) }
-        (L::GrayA, S::F32, 1) => { let v = bytes_as_f32(&bytes); write_one::<GrayA32FE1, K>(enc, w, h, &v, tags) }
-        (L::GrayA, S::F32, 2) => { let v = bytes_as_f32(&bytes); write_one::<GrayA32FE2, K>(enc, w, h, &v, tags) }
-        (L::GrayA, S::F32, 3) => { let v = bytes_as_f32(&bytes); write_one::<GrayA32FE3, K>(enc, w, h, &v, tags) }
-        (L::GrayA, S::F32, 4) => { let v = bytes_as_f32(&bytes); write_one::<GrayA32FE4, K>(enc, w, h, &v, tags) }
-        (L::Rgb, S::U8, 1) => write_one::<Rgb8E1, K>(enc, w, h, &bytes, tags),
-        (L::Rgb, S::U8, 2) => write_one::<Rgb8E2, K>(enc, w, h, &bytes, tags),
-        (L::Rgb, S::U8, 3) => write_one::<Rgb8E3, K>(enc, w, h, &bytes, tags),
-        (L::Rgb, S::U8, 4) => write_one::<Rgb8E4, K>(enc, w, h, &bytes, tags),
-        (L::Rgb, S::U16, 1) => { let v = bytes_as_u16(&bytes); write_one::<Rgb16E1, K>(enc, w, h, &v, tags) }
-        (L::Rgb, S::U16, 2) => { let v = bytes_as_u16(&bytes); write_one::<Rgb16E2, K>(enc, w, h, &v, tags) }
-        (L::Rgb, S::U16, 3) => { let v = bytes_as_u16(&bytes); write_one::<Rgb16E3, K>(enc, w, h, &v, tags) }
-        (L::Rgb, S::U16, 4) => { let v = bytes_as_u16(&bytes); write_one::<Rgb16E4, K>(enc, w, h, &v, tags) }
-        (L::Rgb, S::F32, 1) => { let v = bytes_as_f32(&bytes); write_one::<Rgb32FE1, K>(enc, w, h, &v, tags) }
-        (L::Rgb, S::F32, 2) => { let v = bytes_as_f32(&bytes); write_one::<Rgb32FE2, K>(enc, w, h, &v, tags) }
-        (L::Rgb, S::F32, 3) => { let v = bytes_as_f32(&bytes); write_one::<Rgb32FE3, K>(enc, w, h, &v, tags) }
-        (L::Rgb, S::F32, 4) => { let v = bytes_as_f32(&bytes); write_one::<Rgb32FE4, K>(enc, w, h, &v, tags) }
-        (L::Rgba, S::U8, 1) => write_one::<Rgba8E1, K>(enc, w, h, &bytes, tags),
-        (L::Rgba, S::U8, 2) => write_one::<Rgba8E2, K>(enc, w, h, &bytes, tags),
-        (L::Rgba, S::U8, 3) => write_one::<Rgba8E3, K>(enc, w, h, &bytes, tags),
-        (L::Rgba, S::U8, 4) => write_one::<Rgba8E4, K>(enc, w, h, &bytes, tags),
-        (L::Rgba, S::U16, 1) => { let v = bytes_as_u16(&bytes); write_one::<Rgba16E1, K>(enc, w, h, &v, tags) }
-        (L::Rgba, S::U16, 2) => { let v = bytes_as_u16(&bytes); write_one::<Rgba16E2, K>(enc, w, h, &v, tags) }
-        (L::Rgba, S::U16, 3) => { let v = bytes_as_u16(&bytes); write_one::<Rgba16E3, K>(enc, w, h, &v, tags) }
-        (L::Rgba, S::U16, 4) => { let v = bytes_as_u16(&bytes); write_one::<Rgba16E4, K>(enc, w, h, &v, tags) }
-        (L::Rgba, S::F32, 1) => { let v = bytes_as_f32(&bytes); write_one::<Rgba32FE1, K>(enc, w, h, &v, tags) }
-        (L::Rgba, S::F32, 2) => { let v = bytes_as_f32(&bytes); write_one::<Rgba32FE2, K>(enc, w, h, &v, tags) }
-        (L::Rgba, S::F32, 3) => { let v = bytes_as_f32(&bytes); write_one::<Rgba32FE3, K>(enc, w, h, &v, tags) }
-        (L::Rgba, S::F32, 4) => { let v = bytes_as_f32(&bytes); write_one::<Rgba32FE4, K>(enc, w, h, &v, tags) }
-        (L::Cmyk, S::U8, 1) => write_one::<Cmyk8E1, K>(enc, w, h, &bytes, tags),
-        (L::Cmyk, S::U8, 2) => write_one::<Cmyk8E2, K>(enc, w, h, &bytes, tags),
-        (L::Cmyk, S::U8, 3) => write_one::<Cmyk8E3, K>(enc, w, h, &bytes, tags),
-        (L::Cmyk, S::U8, 4) => write_one::<Cmyk8E4, K>(enc, w, h, &bytes, tags),
-        (L::Cmyk, S::U16, 1) => { let v = bytes_as_u16(&bytes); write_one::<Cmyk16E1, K>(enc, w, h, &v, tags) }
-        (L::Cmyk, S::U16, 2) => { let v = bytes_as_u16(&bytes); write_one::<Cmyk16E2, K>(enc, w, h, &v, tags) }
-        (L::Cmyk, S::U16, 3) => { let v = bytes_as_u16(&bytes); write_one::<Cmyk16E3, K>(enc, w, h, &v, tags) }
-        (L::Cmyk, S::U16, 4) => { let v = bytes_as_u16(&bytes); write_one::<Cmyk16E4, K>(enc, w, h, &v, tags) }
-        (L::Cmyk, S::F32, 1) => { let v = bytes_as_f32(&bytes); write_one::<Cmyk32FE1, K>(enc, w, h, &v, tags) }
-        (L::Cmyk, S::F32, 2) => { let v = bytes_as_f32(&bytes); write_one::<Cmyk32FE2, K>(enc, w, h, &v, tags) }
-        (L::Cmyk, S::F32, 3) => { let v = bytes_as_f32(&bytes); write_one::<Cmyk32FE3, K>(enc, w, h, &v, tags) }
-        (L::Cmyk, S::F32, 4) => { let v = bytes_as_f32(&bytes); write_one::<Cmyk32FE4, K>(enc, w, h, &v, tags) }
-        (L::CmykA, S::U8, 1) => write_one::<CmykA8E1, K>(enc, w, h, &bytes, tags),
-        (L::CmykA, S::U8, 2) => write_one::<CmykA8E2, K>(enc, w, h, &bytes, tags),
-        (L::CmykA, S::U8, 3) => write_one::<CmykA8E3, K>(enc, w, h, &bytes, tags),
-        (L::CmykA, S::U8, 4) => write_one::<CmykA8E4, K>(enc, w, h, &bytes, tags),
-        (L::CmykA, S::U16, 1) => { let v = bytes_as_u16(&bytes); write_one::<CmykA16E1, K>(enc, w, h, &v, tags) }
-        (L::CmykA, S::U16, 2) => { let v = bytes_as_u16(&bytes); write_one::<CmykA16E2, K>(enc, w, h, &v, tags) }
-        (L::CmykA, S::U16, 3) => { let v = bytes_as_u16(&bytes); write_one::<CmykA16E3, K>(enc, w, h, &v, tags) }
-        (L::CmykA, S::U16, 4) => { let v = bytes_as_u16(&bytes); write_one::<CmykA16E4, K>(enc, w, h, &v, tags) }
-        (L::CmykA, S::F32, 1) => { let v = bytes_as_f32(&bytes); write_one::<CmykA32FE1, K>(enc, w, h, &v, tags) }
-        (L::CmykA, S::F32, 2) => { let v = bytes_as_f32(&bytes); write_one::<CmykA32FE2, K>(enc, w, h, &v, tags) }
-        (L::CmykA, S::F32, 3) => { let v = bytes_as_f32(&bytes); write_one::<CmykA32FE3, K>(enc, w, h, &v, tags) }
-        (L::CmykA, S::F32, 4) => { let v = bytes_as_f32(&bytes); write_one::<CmykA32FE4, K>(enc, w, h, &v, tags) }
+    match (img.layout(), img.sample_type()) {
+        (L::Gray, S::U8) => write_extras!(n, enc, w, h, &bytes, tags, u8, 1, 8, 1),
+        (L::Gray, S::U16) => {
+            let v = bytes_as_u16(&bytes);
+            write_extras!(n, enc, w, h, &v, tags, u16, 1, 16, 1)
+        }
+        (L::Gray, S::F32) => {
+            let v = bytes_as_f32(&bytes);
+            write_extras!(n, enc, w, h, &v, tags, f32, 1, 32, 1)
+        }
+        (L::GrayA, S::U8) => write_extras!(n, enc, w, h, &bytes, tags, u8, 1, 8, 2),
+        (L::GrayA, S::U16) => {
+            let v = bytes_as_u16(&bytes);
+            write_extras!(n, enc, w, h, &v, tags, u16, 1, 16, 2)
+        }
+        (L::GrayA, S::F32) => {
+            let v = bytes_as_f32(&bytes);
+            write_extras!(n, enc, w, h, &v, tags, f32, 1, 32, 2)
+        }
+        (L::Rgb, S::U8) => write_extras!(n, enc, w, h, &bytes, tags, u8, 2, 8, 3),
+        (L::Rgb, S::U16) => {
+            let v = bytes_as_u16(&bytes);
+            write_extras!(n, enc, w, h, &v, tags, u16, 2, 16, 3)
+        }
+        (L::Rgb, S::F32) => {
+            let v = bytes_as_f32(&bytes);
+            write_extras!(n, enc, w, h, &v, tags, f32, 2, 32, 3)
+        }
+        (L::Rgba, S::U8) => write_extras!(n, enc, w, h, &bytes, tags, u8, 2, 8, 4),
+        (L::Rgba, S::U16) => {
+            let v = bytes_as_u16(&bytes);
+            write_extras!(n, enc, w, h, &v, tags, u16, 2, 16, 4)
+        }
+        (L::Rgba, S::F32) => {
+            let v = bytes_as_f32(&bytes);
+            write_extras!(n, enc, w, h, &v, tags, f32, 2, 32, 4)
+        }
+        (L::Cmyk, S::U8) => write_extras!(n, enc, w, h, &bytes, tags, u8, 5, 8, 4),
+        (L::Cmyk, S::U16) => {
+            let v = bytes_as_u16(&bytes);
+            write_extras!(n, enc, w, h, &v, tags, u16, 5, 16, 4)
+        }
+        (L::Cmyk, S::F32) => {
+            let v = bytes_as_f32(&bytes);
+            write_extras!(n, enc, w, h, &v, tags, f32, 5, 32, 4)
+        }
+        (L::CmykA, S::U8) => write_extras!(n, enc, w, h, &bytes, tags, u8, 5, 8, 5),
+        (L::CmykA, S::U16) => {
+            let v = bytes_as_u16(&bytes);
+            write_extras!(n, enc, w, h, &v, tags, u16, 5, 16, 5)
+        }
+        (L::CmykA, S::F32) => {
+            let v = bytes_as_f32(&bytes);
+            write_extras!(n, enc, w, h, &v, tags, f32, 5, 32, 5)
+        }
         _ => Err(io::Error::new(io::ErrorKind::InvalidInput, format!("unsupported extra samples ({n})")).into()),
     }
 }

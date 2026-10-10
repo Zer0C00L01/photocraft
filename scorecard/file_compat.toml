@@ -52,7 +52,7 @@ id = "FILE-215-7"
 target = "Layered TIFF read and write (tag 37724), honouring the ask-before-saving pref"
 status = "partial"
 issue = 215
-note = "psd tiff.rs (ImageSourceData, both byte orders), io tiff_layers.rs, ui tiff_options_ui.rs (Discard Layers and Save a Copy); extra alpha/spot channels and a Quick Mask are written as TIFF extra samples (at most 4) plus Photoshop resources for name, colour and solidity"
+note = "psd tiff.rs (ImageSourceData, both byte orders), io tiff_layers.rs, ui tiff_options_ui.rs (Discard Layers and Save a Copy); extra alpha/spot channels and a Quick Mask are written as TIFF extra samples (at most 16) plus Photoshop resources for name, colour and solidity"
 
 [[item]]
 id = "FILE-215-8"

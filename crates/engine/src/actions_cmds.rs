@@ -30,11 +30,30 @@ pub struct Action {
     pub steps: Vec<(String, Value)>,
 }
 
-/// On-disk form of [`ActionState::list`] (`actions.json` in the preset store).
+/// On-disk form of the Actions list (`actions.json` in the preset store).
+///
+/// Version 1 is a flat list: every action is ungrouped. Version 2 adds `sets` (folder names,
+/// including empty folders) and `folders` (the folder of each action, parallel to `actions`;
+/// an empty string is ungrouped).
+pub const ACTIONS_VERSION: u32 = 2;
+
+/// The panel label for actions that are not in a folder.
+pub const UNGROUPED: &str = "Ungrouped Actions";
+
+const MAX_SET_CHARS: usize = 256;
+const MAX_SETS: usize = 64;
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ActionsFile {
     pub version: u32,
     pub actions: Vec<Action>,
+    /// Named folders, in panel order. Version 1 files omit this.
+    #[serde(default)]
+    pub sets: Vec<String>,
+    /// Folder of each action, parallel to `actions`. Empty string means ungrouped.
+    /// Version 1 files omit this.
+    #[serde(default)]
+    pub folders: Vec<String>,
 }
 
 /// Actions list and the recording / playback flags. Only `list` is persisted.
@@ -54,12 +73,62 @@ pub struct ActionState {
     /// Bumped whenever `list` changes, so the preset store can skip unchanged writes.
     #[serde(skip)]
     pub rev: u64,
+    /// Named folders, in panel order. Empty folders stay so a set can exist before it has an action.
+    #[serde(default)]
+    pub sets: Vec<String>,
+    /// Folder name for each action, parallel to `list`. Empty string means ungrouped.
+    /// Shorter than `list` when an action was pushed without a folder.
+    #[serde(default)]
+    pub folders: Vec<String>,
 }
 
 impl ActionState {
     pub(crate) fn touch(&mut self) {
         self.rev = self.rev.saturating_add(1);
     }
+
+    /// Folder of action `index`. A missing entry is ungrouped.
+    pub fn folder(&self, index: usize) -> &str {
+        self.folders.get(index).map(String::as_str).unwrap_or("")
+    }
+
+    /// Keep `folders` the same length as `list`. New entries are ungrouped.
+    pub(crate) fn align_folders(&mut self) {
+        if self.folders.len() < self.list.len() {
+            self.folders.resize(self.list.len(), String::new());
+        } else if self.folders.len() > self.list.len() {
+            self.folders.truncate(self.list.len());
+        }
+    }
+}
+
+/// Add `name` to the folder list when it is not already there. Does not enforce [`MAX_SETS`]:
+/// the built-in DTF folder must still appear. [`new_set`] checks the cap.
+pub(crate) fn ensure_set(state: &mut ActionState, name: &str) -> Result<()> {
+    if name.is_empty() {
+        return Ok(());
+    }
+    if name.chars().count() > MAX_SET_CHARS {
+        return Err(bad("actions.newSet", format!("folder name must be at most {MAX_SET_CHARS} characters")));
+    }
+    if state.sets.iter().any(|n| n == name) {
+        return Ok(());
+    }
+    state.sets.push(name.to_string());
+    state.touch();
+    Ok(())
+}
+
+/// Append an action and its folder. `set` empty means ungrouped.
+pub(crate) fn push_action(s: &mut Session, action: Action, set: &str) -> Result<usize> {
+    if !set.is_empty() {
+        ensure_set(&mut s.actions, set)?;
+    }
+    s.actions.align_folders();
+    s.actions.list.push(action);
+    s.actions.folders.push(set.to_string());
+    s.actions.touch();
+    Ok(s.actions.list.len() - 1)
 }
 
 /// Replay commands and named action calls, excluding edits to the action definitions and the
@@ -145,16 +214,26 @@ fn from_step(p: &Value, len: usize) -> Result<usize> {
 }
 
 fn list(s: &mut Session, _p: &Value) -> Result<Value> {
-    let actions: Vec<Value> = s.actions.list.iter().map(|a| json!({"name": a.name, "steps": a.steps.len()})).collect();
+    s.actions.align_folders();
+    let actions: Vec<Value> = s
+        .actions
+        .list
+        .iter()
+        .enumerate()
+        .map(|(i, a)| json!({"name": a.name, "set": s.actions.folder(i), "steps": a.steps.len()}))
+        .collect();
+    let sets = s.actions.sets.clone();
     let recording = s.actions.recording.and_then(|(_, i)| s.actions.list.get(i).map(|a| a.name.clone()));
-    Ok(json!({"actions": actions, "recording": recording}))
+    Ok(json!({"actions": actions, "sets": sets, "recording": recording}))
 }
 
 fn get(s: &mut Session, p: &Value) -> Result<Value> {
+    s.actions.align_folders();
     let idx = resolve(&s.actions.list, p, "actions.get")?;
+    let set = s.actions.folder(idx).to_string();
     let action = &s.actions.list[idx];
     let steps: Vec<Value> = action.steps.iter().map(|(id, params)| json!([id, params])).collect();
-    Ok(json!({"name": action.name, "steps": steps}))
+    Ok(json!({"name": action.name, "set": set, "steps": steps}))
 }
 
 fn record(s: &mut Session, p: &Value) -> Result<Value> {
@@ -180,9 +259,11 @@ fn record(s: &mut Session, p: &Value) -> Result<Value> {
         if s.actions.list.iter().any(|action| action.name == name) {
             return Err(bad("actions.record", "an action with this name already exists"));
         }
-        s.actions.list.push(Action { name, steps: Vec::new() });
-        s.actions.touch();
-        s.actions.list.len() - 1
+        let set = folder_name(p, "actions.record")?;
+        if !set.is_empty() && !s.actions.sets.iter().any(|n| n == &set) && s.actions.sets.len() >= MAX_SETS {
+            return Err(bad("actions.record", format!("at most {MAX_SETS} folders")));
+        }
+        push_action(s, Action { name, steps: Vec::new() }, &set)?
     };
     s.actions.recording = Some((s.journal.len(), idx));
     let name = s.actions.list.get(idx).map(|a| a.name.clone()).unwrap_or_default();
@@ -328,9 +409,12 @@ fn move_item(s: &mut Session, p: &Value) -> Result<Value> {
         if to >= s.actions.list.len() {
             return Err(bad("actions.move", "destination is out of range"));
         }
+        s.actions.align_folders();
         let moved = s.actions.list.remove(idx);
+        let folder = s.actions.folders.remove(idx);
         let result = json!({"action": moved.name, "index": to});
         s.actions.list.insert(to, moved);
+        s.actions.folders.insert(to, folder);
         if let Some((_, recording)) = s.actions.recording.as_mut() {
             *recording = moved_index(*recording, idx, to);
         }
@@ -375,9 +459,118 @@ fn delete(s: &mut Session, p: &Value) -> Result<Value> {
     if s.actions.recording.is_some() {
         return Err(bad("actions.delete", "stop recording before deleting an action"));
     }
+    s.actions.align_folders();
     let name = s.actions.list.remove(idx).name;
+    s.actions.folders.remove(idx);
     s.actions.touch();
     Ok(json!({"deleted": name}))
+}
+
+fn folder_name(p: &Value, cmd: &str) -> Result<String> {
+    match p.get("set") {
+        None | Some(Value::Null) => Ok(String::new()),
+        Some(Value::String(n)) if n.chars().count() > MAX_SET_CHARS => Err(bad(cmd, format!("folder name must be at most {MAX_SET_CHARS} characters"))),
+        Some(Value::String(n)) => Ok(n.clone()),
+        Some(_) => Err(bad(cmd, "\"set\" must be a string")),
+    }
+}
+
+fn new_set(s: &mut Session, p: &Value) -> Result<Value> {
+    not_playing(s, "actions.newSet")?;
+    let name = match p.get("name") {
+        None | Some(Value::Null) => {
+            let mut n = s.actions.sets.len().saturating_add(1);
+            while s.actions.sets.iter().any(|a| a == &format!("Set {n}")) {
+                n = n.checked_add(1).ok_or_else(|| bad("actions.newSet", "cannot allocate a unique folder name"))?;
+            }
+            format!("Set {n}")
+        }
+        Some(Value::String(n)) if n.is_empty() => return Err(bad("actions.newSet", "folder name is empty")),
+        Some(Value::String(n)) => n.clone(),
+        Some(_) => return Err(bad("actions.newSet", "\"name\" must be a string")),
+    };
+    if name.chars().count() > MAX_SET_CHARS {
+        return Err(bad("actions.newSet", format!("folder name must be at most {MAX_SET_CHARS} characters")));
+    }
+    if s.actions.sets.iter().any(|a| a == &name) {
+        return Err(bad("actions.newSet", "a folder with this name already exists"));
+    }
+    if s.actions.sets.len() >= MAX_SETS {
+        return Err(bad("actions.newSet", format!("at most {MAX_SETS} folders")));
+    }
+    ensure_set(&mut s.actions, &name)?;
+    Ok(json!({"set": name}))
+}
+
+fn delete_set(s: &mut Session, p: &Value) -> Result<Value> {
+    not_playing(s, "actions.deleteSet")?;
+    let name = match p.get("name").or_else(|| p.get("set")) {
+        Some(Value::String(n)) if !n.is_empty() => n.clone(),
+        Some(Value::String(_)) => return Err(bad("actions.deleteSet", "folder name is empty")),
+        _ => return Err(bad("actions.deleteSet", "needs \"name\"")),
+    };
+    s.actions.align_folders();
+    if !s.actions.sets.iter().any(|n| n == &name) && !s.actions.folders.iter().any(|n| n == &name) {
+        return Err(bad("actions.deleteSet", format!("no folder named `{name}`")));
+    }
+    s.actions.sets.retain(|n| n != &name);
+    for folder in &mut s.actions.folders {
+        if folder == &name {
+            folder.clear();
+        }
+    }
+    s.actions.touch();
+    Ok(json!({"deleted": name}))
+}
+
+fn set_folder(s: &mut Session, p: &Value) -> Result<Value> {
+    not_playing(s, "actions.setFolder")?;
+    let idx = resolve(&s.actions.list, p, "actions.setFolder")?;
+    if p.get("set").is_none() {
+        return Err(bad("actions.setFolder", "needs \"set\" (a folder name, or \"\" for ungrouped)"));
+    }
+    let set = folder_name(p, "actions.setFolder")?;
+    if !set.is_empty() && !s.actions.sets.iter().any(|n| n == &set) && s.actions.sets.len() >= MAX_SETS {
+        return Err(bad("actions.setFolder", format!("at most {MAX_SETS} folders")));
+    }
+    if !set.is_empty() {
+        ensure_set(&mut s.actions, &set)?;
+    }
+    s.actions.align_folders();
+    s.actions.folders[idx] = set.clone();
+    let name = s.actions.list[idx].name.clone();
+    s.actions.touch();
+    Ok(json!({"action": name, "set": set}))
+}
+
+fn set_step(s: &mut Session, p: &Value) -> Result<Value> {
+    not_playing(s, "actions.setStep")?;
+    let idx = resolve(&s.actions.list, p, "actions.setStep")?;
+    let Some(step) = p.get("step").and_then(Value::as_u64).and_then(|n| usize::try_from(n).ok()) else {
+        return Err(bad("actions.setStep", "step must be a non-negative integer"));
+    };
+    let Some(params) = p.get("params").cloned() else {
+        return Err(bad("actions.setStep", "needs \"params\""));
+    };
+    if !params.is_object() {
+        return Err(bad("actions.setStep", "params must be an object"));
+    }
+    let len = s.actions.list[idx].steps.len().saturating_add(pending_steps(s, idx).count());
+    if step >= len {
+        return Err(bad("actions.setStep", "step is out of range"));
+    }
+    if s.actions.recording.is_some_and(|(_, i)| i == idx) {
+        flush_recording(s)?;
+    }
+    let action = &mut s.actions.list[idx];
+    let Some(slot) = action.steps.get_mut(step) else {
+        return Err(bad("actions.setStep", "step is out of range"));
+    };
+    slot.1 = params;
+    let name = action.name.clone();
+    s.actions.touch();
+    crate::dtf_cmds::note_edited_step(s, idx);
+    Ok(json!({"action": name, "step": step}))
 }
 
 pub fn specs() -> Vec<CommandSpec> {
@@ -397,7 +590,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "List Actions",
             menu: &[],
             shortcut: None,
-            params: "{} → {actions:[{name, steps:count}], recording:name|null}",
+            params: r##"{} → {actions:[{name, set, steps:count}], sets:[folder…], recording:name|null}. set is "" when the action is ungrouped."##,
             enabled: always,
             run: list,
             journal: false,
@@ -417,7 +610,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "Record Action",
             menu: &[],
             shortcut: None,
-            params: r##"{"name":str? (new action, default "Action N")} or {"action":name|index} (append) → {action, index}"##,
+            params: r##"{"name":str?, "set":str?} (new action, default name "Action N", set "" is ungrouped) or {"action":name|index} (append) → {action, index}"##,
             enabled: always,
             run: record,
             journal: false,
@@ -450,6 +643,46 @@ pub fn specs() -> Vec<CommandSpec> {
             params: r##"{"action":name|index, "step":index?} → {deleted:name} or {action, deletedStep, steps:count}. step is 0-based, including pending recorded steps. Whole-action deletion is refused while recording."##,
             enabled: always,
             run: delete,
+            journal: false,
+        },
+        CommandSpec {
+            id: "actions.newSet",
+            label: "New Action Set",
+            menu: &[],
+            shortcut: None,
+            params: r##"{"name":str?} → {set}. Creates an empty folder. The default name is "Set N". Refuses an empty name, a duplicate, or more than 64 folders."##,
+            enabled: always,
+            run: new_set,
+            journal: false,
+        },
+        CommandSpec {
+            id: "actions.deleteSet",
+            label: "Delete Action Set",
+            menu: &[],
+            shortcut: None,
+            params: r##"{"name":str} → {deleted}. Removes the folder. Its actions become ungrouped; they are not deleted."##,
+            enabled: always,
+            run: delete_set,
+            journal: false,
+        },
+        CommandSpec {
+            id: "actions.setFolder",
+            label: "Move Action to Set",
+            menu: &[],
+            shortcut: None,
+            params: r##"{"action":name|index, "set":str} → {action, set}. set "" leaves the action ungrouped. A new non-empty name creates the folder."##,
+            enabled: always,
+            run: set_folder,
+            journal: false,
+        },
+        CommandSpec {
+            id: "actions.setStep",
+            label: "Set Action Step",
+            menu: &[],
+            shortcut: None,
+            params: r##"{"action":name|index, "step":index, "params":object} → {action, step}. Replaces that step's parameters. Numbers, strings and booleans are what the Actions panel edits."##,
+            enabled: always,
+            run: set_step,
             journal: false,
         },
     ]
@@ -817,7 +1050,7 @@ mod tests {
             json!({"from": -3}),
             json!({"action": "missing", "from": 4}),
         ];
-        for id in ["actions.list", "actions.get", "actions.record", "actions.stop", "actions.play", "actions.delete", "actions.move"] {
+        for id in ["actions.list", "actions.get", "actions.record", "actions.stop", "actions.play", "actions.delete", "actions.move", "actions.newSet", "actions.deleteSet", "actions.setFolder", "actions.setStep"] {
             for p in &junk {
                 let _ = s.execute(id, p.clone());
             }
@@ -864,5 +1097,49 @@ mod tests {
         assert_eq!(bad.actions.list.len(), 1);
         assert_eq!(bad.actions.list[0].name, "DTF");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn folders_round_trip_and_version_1_stays_ungrouped() {
+        let mut s = Session::new();
+        s.execute("actions.newSet", json!({"name": "DTF"})).unwrap();
+        s.execute("actions.record", json!({"name": "White", "set": "DTF"})).unwrap();
+        s.execute("actions.stop", json!({})).unwrap();
+        s.actions.list[0].steps.push(("image.dtf".into(), json!({"contract": 1, "name": "White"})));
+        s.actions.touch();
+        assert_eq!(s.execute("actions.setStep", json!({"action": "White", "step": 0, "params": {"contract": 3, "name": "Gloss"}})).unwrap()["step"], 0);
+        assert_eq!(s.actions.list[0].steps[0].1["name"], "Gloss");
+        assert_eq!(s.actions.folder(0), "DTF");
+        s.execute("actions.setFolder", json!({"action": "White", "set": ""})).unwrap();
+        assert!(s.actions.folder(0).is_empty());
+        s.execute("actions.setFolder", json!({"action": 0, "set": "DTF"})).unwrap();
+        s.execute("actions.newSet", json!({"name": "Empty"})).unwrap();
+        s.execute("actions.deleteSet", json!({"name": "DTF"})).unwrap();
+        assert!(s.actions.folder(0).is_empty(), "deleting a folder ungroups its actions");
+        assert!(s.actions.sets.iter().any(|n| n == "Empty"));
+        assert!(s.execute("actions.newSet", json!({"name": ""})).is_err());
+        assert!(s.execute("actions.setStep", json!({"action": 0, "step": 5, "params": {}})).is_err());
+        assert!(s.execute("actions.setStep", json!({"action": 0, "step": 0, "params": [1]})).is_err());
+        assert!(s.execute("actions.deleteSet", json!({})).is_err());
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let dir = std::env::temp_dir().join(format!("pc-actions-{}-v1", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("actions.json"),
+                r#"{"version":1,"actions":[{"name":"Old","steps":[["layer.new.layer",{}]]}]}"#,
+            )
+            .unwrap();
+            let mut loaded = Session::new();
+            loaded.attach_preset_store(crate::preset_store::open_dir(&dir));
+            let old = loaded.actions.list.iter().position(|a| a.name == "Old").unwrap();
+            assert!(loaded.actions.folder(old).is_empty(), "version 1 actions stay ungrouped");
+            let dtf = loaded.actions.list.iter().position(|a| a.name == "DTF").unwrap();
+            assert_eq!(loaded.actions.folder(dtf), "DTF");
+            assert!(loaded.actions.sets.iter().any(|n| n == "DTF"));
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 }

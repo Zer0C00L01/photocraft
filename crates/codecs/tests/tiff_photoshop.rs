@@ -65,10 +65,31 @@ fn extra_samples_round_trip() {
 }
 
 #[test]
-fn more_than_four_extra_samples_is_refused() {
+fn more_than_sixteen_extra_samples_is_refused() {
     let mut img = synth(2, 2, ChannelLayout::Rgb, SampleType::U8, 1, 0.0);
-    img.meta.extra_samples = (0..5).map(|_| ExtraSample { kind: 0, data: vec![0; 4] }).collect();
+    img.meta.extra_samples = (0..MAX_EXTRA_SAMPLES + 1).map(|_| ExtraSample { kind: 0, data: vec![0; 4] }).collect();
     assert!(encode(&img, Format::Tiff, &EncodeOptions::default()).is_err());
+}
+
+#[test]
+fn sixteen_extra_samples_round_trip() {
+    for (layout, sample, base) in [
+        (ChannelLayout::Rgb, SampleType::U8, 3usize),
+        (ChannelLayout::Rgba, SampleType::U8, 4),
+        (ChannelLayout::Gray, SampleType::U16, 1),
+        (ChannelLayout::Cmyk, SampleType::F32, 4),
+    ] {
+        let mut img = synth(2, 2, layout, sample, 1, 0.0);
+        let n = 2 * 2 * sample.bytes();
+        img.meta.extra_samples = (0..MAX_EXTRA_SAMPLES).map(|k| ExtraSample { kind: 0, data: vec![k as u8; n] }).collect();
+        let bytes = encode(&img, Format::Tiff, &EncodeOptions::default()).unwrap();
+        let back = decode(&bytes).unwrap();
+        assert_eq!(back.layout(), layout, "{layout:?} {sample:?} base {base}");
+        assert_eq!(back.data(), img.data(), "{layout:?}");
+        assert_eq!(back.meta.extra_samples.len(), MAX_EXTRA_SAMPLES, "{layout:?}");
+        assert_eq!(back.meta.extra_samples[7].kind, 0, "{layout:?}");
+        assert_eq!(back.meta.extra_samples[15].data, vec![15; n], "{layout:?}");
+    }
 }
 
 #[test]
