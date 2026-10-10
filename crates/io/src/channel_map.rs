@@ -69,6 +69,21 @@ fn display_stride(body: &[u8], versioned: bool) -> usize {
     if unpadded && (!padded || versioned) { 13 } else { 14 }
 }
 
+/// Which of the first `count` DisplayInfo records are spot channels (kind 2).
+/// Missing records are not spots. Alpha channels (kind 0 or 1) stay false: their samples
+/// are stored straight, while a spot's samples are stored inverted.
+pub(crate) fn spot_flags(data: &[u8], versioned: bool, count: usize) -> Vec<bool> {
+    let body = if versioned { data.get(4..).unwrap_or(&[]) } else { data };
+    let stride = display_stride(body, versioned);
+    let mut out = vec![false; count];
+    for (i, rec) in body.chunks(stride).take(count).enumerate() {
+        if rec.len() >= 13 {
+            out[i] = rec[12] == 2;
+        }
+    }
+    out
+}
+
 /// Applies a DisplayInfo resource (`versioned` = 1077) to the imported channels in order.
 pub(crate) fn apply_display_info(data: &[u8], versioned: bool, channels: &mut [AlphaChannel]) {
     let body = if versioned { data.get(4..).unwrap_or(&[]) } else { data };

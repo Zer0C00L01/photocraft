@@ -1376,7 +1376,9 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32) -
     for a in &extra {
         let s = if a.surface.format() != ex.mask_fmt { a.surface.convert(ex.mask_fmt) } else { a.surface.clone() };
         let bytes = s.to_interleaved(canvas);
-        planes.extend(deinterleave(&bytes, 1, sample, &[false]).remove(0));
+        // Spot ink is stored inverted (0 = solid, max = paper), the same way Multichannel
+        // and a Photoshop TIFF do. An alpha channel stays straight (max = selected).
+        planes.extend(deinterleave(&bytes, 1, sample, &[a.spot.is_some()]).remove(0));
     }
     let channels = (cc + usize::from(has_alpha) + extra.len()) as u16;
     let header = Header::new(version, doc.size.width, doc.size.height, channels, psd_depth(sample), psd_mode(fmt.mode));

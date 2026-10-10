@@ -426,7 +426,8 @@ fn native_plane_to_be(src: &[u8], bps: usize) -> Result<Vec<u8>, IoError> {
 }
 
 /// Extra planes of a PSD merged image (`skip` colour-and-alpha planes already consumed), as
-/// native-endian TIFF extra samples. Spot and alpha planes are not ink-inverted.
+/// native-endian TIFF extra samples. A spot plane is already Photoshop ink (0 = solid, max =
+/// paper); an alpha plane is already straight. Neither is inverted again here.
 fn native_extra_planes(planes: &[u8], w: u32, h: u32, skip: usize, count: usize, sample: CSample) -> Result<Vec<codecs::ExtraSample>, IoError> {
     let bps = sample.bytes();
     let n = (w as usize).checked_mul(h as usize).ok_or_else(|| IoError::Unsupported("image size overflows".into()))?;
@@ -460,11 +461,15 @@ fn channel_plane(channel: &AlphaChannel, canvas: Rect, sample: CSample) -> Resul
         owned = channel.surface.convert(fmt);
         &owned
     };
-    let bytes = surface.to_interleaved(canvas);
+    let mut bytes = surface.to_interleaved(canvas);
     let n = (canvas.width() as usize).saturating_mul(canvas.height() as usize);
     let expect = n.saturating_mul(depth.bytes());
     if bytes.len() != expect {
         return Err(format!("channel \"{}\" does not cover the canvas", channel.name));
+    }
+    // Document density is 1 = solid ink. Photoshop's TIFF stores the opposite for a spot.
+    if channel.spot.is_some() {
+        crate::pixels::invert_plane(&mut bytes, depth, false);
     }
     if sample == CSample::F16 {
         let mut out = Vec::with_capacity(n.saturating_mul(2));
@@ -704,10 +709,19 @@ pub(crate) fn channels_from_extras(doc: &mut Document, img: &Image) -> Vec<Strin
     let none = Vec::new();
     let resources = parsed.as_ref().map(|(r, _)| r.as_slice()).unwrap_or(&none);
     let names = resources.iter().find(|r| r.id == 1045).map(|r| crate::psd_import::unicode_names(&r.data)).unwrap_or_default();
+    let kept = img.meta.extra_samples.len().min(codecs::MAX_EXTRA_SAMPLES);
+    let spots = if let Some(r) = resources.iter().find(|r| r.id == crate::channel_map::DISPLAY_INFO) {
+        crate::channel_map::spot_flags(&r.data, true, kept)
+    } else if let Some(r) = resources.iter().find(|r| r.id == crate::channel_map::DISPLAY_INFO_OLD) {
+        crate::channel_map::spot_flags(&r.data, false, kept)
+    } else {
+        vec![false; kept]
+    };
     let start = doc.channels.len();
     let n_px = (w as usize).saturating_mul(h as usize);
     for (k, e) in img.meta.extra_samples.iter().take(codecs::MAX_EXTRA_SAMPLES).enumerate() {
-        match mask_from_plane(&e.data, w, h, n_px, img.sample_type(), doc.depth) {
+        let invert = spots.get(k).copied().unwrap_or(false);
+        match mask_from_plane(&e.data, w, h, n_px, img.sample_type(), doc.depth, invert) {
             Ok(surface) => {
                 let name = names.get(k).cloned().filter(|s| !s.is_empty()).unwrap_or_else(|| format!("Alpha {}", k + 1));
                 doc.channels.push(AlphaChannel::new(name, surface));
@@ -738,9 +752,10 @@ pub(crate) fn channels_from_extras(doc: &mut Document, img: &Image) -> Vec<Strin
 }
 
 /// Native-endian extra-sample bytes → a grayscale surface at the document depth.
-fn mask_from_plane(data: &[u8], w: u32, h: u32, n: usize, from: CSample, depth: SampleType) -> Result<Surface, String> {
+/// `invert` turns Photoshop spot ink (0 = solid) into document density (1 = solid).
+fn mask_from_plane(data: &[u8], w: u32, h: u32, n: usize, from: CSample, depth: SampleType, invert: bool) -> Result<Surface, String> {
     let rect = Rect::new(0, 0, w as i32, h as i32);
-    let bytes = match (from, depth) {
+    let mut bytes = match (from, depth) {
         (CSample::U8, SampleType::U8) | (CSample::U16, SampleType::U16) | (CSample::F32, SampleType::F32) => {
             if data.len() != n.saturating_mul(from.bytes()) {
                 return Err("an extra TIFF sample did not match the image and was dropped".into());
@@ -763,6 +778,9 @@ fn mask_from_plane(data: &[u8], w: u32, h: u32, n: usize, from: CSample, depth: 
         }
         _ => return Err(format!("an extra TIFF sample ({from:?}) does not match the document depth and was dropped")),
     };
+    if invert {
+        crate::pixels::invert_plane(&mut bytes, depth, false);
+    }
     if bytes.len() != n.saturating_mul(depth.bytes()) {
         return Err("an extra TIFF sample did not match the image and was dropped".into());
     }

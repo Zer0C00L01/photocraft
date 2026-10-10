@@ -459,14 +459,16 @@ fn dtf_like_spot_is_written_in_full() {
         assert_eq!(img.layout().color_channels(), 3, "{name}");
         assert_eq!(img.meta.extra_samples.len(), 1, "{name}");
         assert_eq!(img.meta.extra_samples[0].kind, 0, "{name}");
-        assert_eq!(img.meta.extra_samples[0].data, spot_bytes, "{name} own decoder");
+        // Photoshop stores spot ink inverted: document 255 (solid) is file 0.
+        let stored_spot: Vec<u8> = spot_bytes.iter().map(|b| 255 - b).collect();
+        assert_eq!(img.meta.extra_samples[0].data, stored_spot, "{name} own decoder");
 
         let (spp, bps, extra, rows, samples) = independent_samples(&r.bytes);
         assert_eq!(spp, 4, "{name}");
         assert_eq!(bps, vec![8, 8, 8, 8], "{name}");
         assert_eq!(extra, vec![0], "{name} ExtraSamples");
         assert!(rows > 0 && rows < h, "{name} rows_per_strip {rows}");
-        assert_plane(&samples, 4, 3, &spot_bytes);
+        assert_plane(&samples, 4, 3, &stored_spot);
         seen.push(samples.clone());
 
         // Outside the artwork the composite is matted to white (Save Transparency off). The
@@ -630,6 +632,98 @@ fn assert_photoshop_layered_tiff(bytes: &[u8], with_spot: bool) {
     assert!(ids.contains(&-1), "channel ids {ids:?}");
 }
 
+/// Photoshop 27's Kato-Karate TIFF stores spot ink inverted: every non-white artwork pixel
+/// has spot 0, and the white background is spot 255. An alpha channel is the other way
+/// around (255 = selected). Both polarities round-trip, in TIFF and in PSD.
+#[test]
+fn spot_ink_is_stored_as_zero_and_alpha_is_not() {
+    use photocraft_color::{Color, PixelFormat};
+    use photocraft_doc::{AlphaChannel, Layer};
+    use photocraft_geom::{Rect, Size};
+    use photocraft_psd::PsdFile;
+    use photocraft_raster::Surface;
+
+    for depth in [SampleType::U8, SampleType::U16, SampleType::F32] {
+        let (w, h) = (8u32, 8u32);
+        let mut doc = Document::new("pol", Size::new(w, h), ColorMode::Rgb, depth);
+        let fmt = doc.pixel_format();
+        let mut art = Surface::new(fmt);
+        art.fill_rect(Rect::new(2, 2, 6, 6), &photocraft_raster::from_rgba(&fmt, [1.0, 0.2, 0.1, 1.0]));
+        doc.layers.push(Layer::new("Art", LayerContent::Raster(art)));
+        let gray = PixelFormat::new(ColorMode::Grayscale, depth, false);
+        let n = (w as usize) * (h as usize);
+        let mut ink = vec![0.0f32; n];
+        for y in 2..6 {
+            for x in 2..6 {
+                ink[y * w as usize + x] = 1.0;
+            }
+        }
+        let mut spot = AlphaChannel::new("Spot Color 1", Surface::new(gray));
+        spot.surface.write_region(Rect::new(0, 0, w as i32, h as i32), &ink);
+        spot.spot = Some((Color::rgb(1.0, 0.0, 0.0), 0.6));
+        doc.channels.push(spot);
+        let mut alpha = AlphaChannel::new("Alpha 1", Surface::new(gray));
+        alpha.surface.write_region(Rect::new(0, 0, w as i32, h as i32), &ink);
+        doc.channels.push(alpha);
+
+        let psd = export(&doc, "pol.psd", &ExportOptions::default()).unwrap();
+        let file = PsdFile::from_bytes(&psd.bytes).unwrap();
+        let merged = file.decode_merged().unwrap();
+        let bps = depth.bytes();
+        let plane = n * bps;
+        let first = 3 + usize::from(file.merged_has_alpha());
+        let spot_plane = &merged[first * plane..(first + 1) * plane];
+        let alpha_plane = &merged[(first + 1) * plane..(first + 2) * plane];
+        // Background (0,0) and artwork (3,3). Spot: 0 = solid ink, max = paper.
+        // Alpha: max = selected, 0 = empty.
+        assert_stored(spot_plane, 0, depth, false, "psd spot background");
+        assert_stored(spot_plane, (3 * w as usize + 3) * bps, depth, true, "psd spot art");
+        assert_stored(alpha_plane, 0, depth, true, "psd alpha background");
+        assert_stored(alpha_plane, (3 * w as usize + 3) * bps, depth, false, "psd alpha art");
+        let back = import("pol.psd", &psd.bytes).unwrap().document;
+        let area = Rect::new(0, 0, w as i32, h as i32);
+        assert_eq!(back.channels[0].surface.to_interleaved(area), doc.channels[0].surface.to_interleaved(area), "{depth:?} psd spot");
+        assert_eq!(back.channels[1].surface.to_interleaved(area), doc.channels[1].surface.to_interleaved(area), "{depth:?} psd alpha");
+        assert!(back.channels[0].spot.is_some(), "{depth:?}");
+        assert!(back.channels[1].spot.is_none(), "{depth:?}");
+
+        if depth == SampleType::U8 {
+            for layers in [false, true] {
+                let r = export(&doc, "pol.tif", &ExportOptions { tiff_layers: layers, ..ExportOptions::default() }).unwrap();
+                let (spp, _bps, extra, _rows, samples) = independent_samples(&r.bytes);
+                assert_eq!((spp, extra.as_slice()), (5, [0u16, 0].as_slice()), "{layers}");
+                // Reference TIFF: artwork spot sample is 0, background spot sample is 255.
+                assert_eq!(samples[3], 255, "{layers} background spot");
+                assert_eq!(samples[(3 * w as usize + 3) * 5 + 3], 0, "{layers} art spot");
+                assert_eq!(samples[4], 0, "{layers} background alpha");
+                assert_eq!(samples[(3 * w as usize + 3) * 5 + 4], 255, "{layers} art alpha");
+                let back = import("pol.tif", &r.bytes).unwrap().document;
+                assert_eq!(back.channels[0].surface.to_interleaved(area), doc.channels[0].surface.to_interleaved(area), "{layers}");
+                assert_eq!(back.channels[1].surface.to_interleaved(area), doc.channels[1].surface.to_interleaved(area), "{layers}");
+            }
+        }
+    }
+}
+
+/// `at` addresses one sample of a big-endian PSD plane. `zero` expects 0; otherwise the
+/// maximum sample (255 / 65535 / 1.0).
+fn assert_stored(plane: &[u8], at: usize, depth: SampleType, zero: bool, what: &str) {
+    match depth {
+        SampleType::U8 => {
+            let v = plane[at];
+            assert_eq!(v, if zero { 0 } else { 255 }, "{what} {v}");
+        }
+        SampleType::U16 => {
+            let v = u16::from_be_bytes([plane[at], plane[at + 1]]);
+            assert_eq!(v, if zero { 0 } else { 65535 }, "{what} {v}");
+        }
+        SampleType::F32 => {
+            let v = f32::from_be_bytes([plane[at], plane[at + 1], plane[at + 2], plane[at + 3]]);
+            assert_eq!(v, if zero { 0.0 } else { 1.0 }, "{what} {v}");
+        }
+    }
+}
+
 /// Quick Mask stays the last channel after the merged transparency plane is omitted.
 #[test]
 fn spot_tiff_keeps_quick_mask_when_composite_alpha_is_omitted() {
@@ -658,7 +752,9 @@ fn spot_tiff_keeps_quick_mask_when_composite_alpha_is_omitted() {
         let r = export(&doc, "q.tif", &ExportOptions { tiff_layers: layers, ..ExportOptions::default() }).unwrap();
         let (spp, _bps, extra, _rows, samples) = independent_samples(&r.bytes);
         assert_eq!((spp, extra.as_slice()), (5, [0, 0].as_slice()), "{layers}");
-        assert_plane(&samples, 5, 3, &spot_bytes);
+        let stored_spot: Vec<u8> = spot_bytes.iter().map(|b| 255 - b).collect();
+        assert_plane(&samples, 5, 3, &stored_spot);
+        // A Quick Mask is an alpha channel: stored straight, not as spot ink.
         assert_plane(&samples, 5, 4, &qbytes);
         let back = import("q.tif", &r.bytes).unwrap().document;
         assert_eq!(back.channels.len(), 1, "{layers}");

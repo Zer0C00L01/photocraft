@@ -789,10 +789,23 @@ pub fn psd_to_document_with(file: &PsdFile, ctl: &photocraft_raster::Interrupt) 
         let first = cc + usize::from(file.merged_has_alpha());
         let plane = h.row_bytes() * hh;
         let names = file.resource(1045).map(|r| unicode_names(&r.data)).unwrap_or_default();
+        let extra_n = usize::from(h.channels).saturating_sub(first);
+        // Spot planes are ink-inverted in the file (0 = solid). Alpha planes are not.
+        let spots = if let Some(r) = file.resource(crate::channel_map::DISPLAY_INFO) {
+            crate::channel_map::spot_flags(&r.data, true, extra_n)
+        } else if let Some(r) = file.resource(crate::channel_map::DISPLAY_INFO_OLD) {
+            crate::channel_map::spot_flags(&r.data, false, extra_n)
+        } else {
+            vec![false; extra_n]
+        };
         for (k, idx) in (first..usize::from(h.channels)).enumerate() {
             let Some(p) = all.get(idx * plane..(idx + 1) * plane) else { break };
+            let mut raw = be_to_ne_plane(p, depth, n);
+            if spots.get(k).copied().unwrap_or(false) {
+                crate::pixels::invert_plane(&mut raw, depth, false);
+            }
             let mut s = Surface::new(cx.mask_fmt);
-            s.write_interleaved(canvas, &be_to_ne_plane(p, depth, n));
+            s.write_interleaved(canvas, &raw);
             s.prune();
             let name = names.get(k).cloned().unwrap_or_else(|| format!("Alpha {}", k + 1));
             doc.channels.push(AlphaChannel::new(name, s));
