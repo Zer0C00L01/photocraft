@@ -843,9 +843,10 @@ mod tests {
         let mut t = Session::new();
         t.attach_preset_store(crate::preset_store::open_dir(&dir));
         let listed = t.execute("actions.list", json!({})).unwrap();
-        assert_eq!(listed["actions"][0]["name"], "Kept");
-        assert_eq!(listed["actions"][0]["steps"], 1);
+        let kept = listed["actions"].as_array().and_then(|a| a.iter().find(|e| e["name"] == "Kept")).expect("Kept");
+        assert_eq!(kept["steps"], 1);
         assert_eq!(t.execute("actions.get", json!({"action": "Kept"})).unwrap()["steps"][0][0], "layer.new.layer");
+        assert!(listed["actions"].as_array().is_some_and(|a| a.iter().any(|e| e["name"] == "DTF")));
 
         // An action created before the store finishes loading is kept, and a different one on
         // disk is merged in.
@@ -860,7 +861,8 @@ mod tests {
         let mut bad = Session::new();
         let warnings = bad.attach_preset_store(crate::preset_store::open_dir(&dir));
         assert!(warnings.iter().any(|w| w.contains("actions")), "{warnings:?}");
-        assert!(bad.actions.list.is_empty());
+        assert_eq!(bad.actions.list.len(), 1);
+        assert_eq!(bad.actions.list[0].name, "DTF");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -248,7 +248,9 @@ pub(crate) fn decode_page(bytes: &[u8], page: Option<usize>, limits: &Limits) ->
         .ok_or_else(|| CodecError::InvalidImage(format!("TIFF page {index} does not exist (the file has {} directories)", info.pages.len())))?;
     let dir = file.ifd(p.ifd_offset).ok_or_else(|| err("image directory cut off"))?;
     let mut img = decode_ifd(&file, &dir, limits)?;
+    let extra_samples = std::mem::take(&mut img.meta.extra_samples);
     img.meta = metadata(&file, &dir, &mut img.icc);
+    img.meta.extra_samples = extra_samples;
     let pages = info.page_count();
     if pages > 1 {
         img.warnings.push(DecodeWarning::MorePages { total: info.complete.then_some(u32::try_from(pages).unwrap_or(u32::MAX)) });
@@ -415,6 +417,8 @@ struct Layout {
     palette: Option<Vec<[u16; 3]>>,
     /// Upper bound for one chunk's scratch buffer.
     scratch_cap: usize,
+    /// File sample indices that are neither colour nor the chosen alpha (spot / extra alpha).
+    extra_at: Vec<usize>,
 }
 
 impl Layout {
@@ -427,6 +431,9 @@ impl Layout {
     }
     fn out_row(&self) -> usize {
         self.w * self.out_channels() * self.out.bytes()
+    }
+    fn extra_row(&self) -> usize {
+        self.w.saturating_mul(self.extra_at.len()).saturating_mul(self.out.bytes())
     }
     /// A chunky strip already in the output's layout: decoded in place.
     fn direct(&self) -> bool {
@@ -528,13 +535,17 @@ fn decode_ifd(f: &File<'_>, dir: &Ifd, limits: &Limits) -> Result<Image, CodecEr
     // returns the alpha only when it is the first extra sample: otherwise it is asked for every
     // sample (as multiband gray) and the colour and alpha samples are picked here. An alpha
     // position past the samples the file has is ignored.
-    let color = match photometric {
+    let color: usize = match photometric {
         2 => 3,
         5 => 4,
         _ => 1,
     };
-    let alpha_at = extra.iter().position(|&e| e == 1 || e == 2).filter(|&a| (color + a as u64) < spp);
-    let all_samples = palette.is_none() && matches!(photometric, 2 | 5) && alpha_at.is_some_and(|a| a > 0);
+    let alpha_at = extra.iter().position(|&e| e == 1 || e == 2).filter(|&a| (color as u64).saturating_add(a as u64) < spp);
+    // Samples the colour model does not keep. RGB/CMYK only hand back every sample when asked
+    // (photometric patched to black-is-zero below); gray already comes back as multiband.
+    let unused = !extra.is_empty() && (spp as usize) > color.saturating_add(usize::from(alpha_at.is_some()));
+    let all_samples = palette.is_none()
+        && ((matches!(photometric, 2 | 5) && alpha_at.is_some_and(|a| a > 0)) || (!planar && matches!(photometric, 2 | 5) && unused));
     let mut patches: Vec<(u64, Vec<u8>)> = Vec::new();
     let encode_u = |v: u64, len: usize| -> Vec<u8> {
         let b = if f.le { v.to_le_bytes() } else { v.to_be_bytes() };
@@ -577,7 +588,30 @@ fn decode_ifd(f: &File<'_>, dir: &Ifd, limits: &Limits) -> Result<Image, CodecEr
         _ if palette.is_some() => (ChannelLayout::Rgb, 1),
         tiff::ColorType::Gray(_) => (ChannelLayout::Gray, 1),
         tiff::ColorType::Multiband { num_samples, .. } if all_samples => {
-            (if photometric == 2 { ChannelLayout::Rgba } else { ChannelLayout::CmykA }, usize::from(num_samples))
+            let layout = match photometric {
+                2 => {
+                    if alpha_at.is_some() {
+                        ChannelLayout::Rgba
+                    } else {
+                        ChannelLayout::Rgb
+                    }
+                }
+                5 => {
+                    if alpha_at.is_some() {
+                        ChannelLayout::CmykA
+                    } else {
+                        ChannelLayout::Cmyk
+                    }
+                }
+                _ => {
+                    if gray_alpha {
+                        ChannelLayout::GrayA
+                    } else {
+                        ChannelLayout::Gray
+                    }
+                }
+            };
+            (layout, usize::from(num_samples))
         }
         tiff::ColorType::Multiband { num_samples, .. } if photometric <= 1 => {
             (if gray_alpha { ChannelLayout::GrayA } else { ChannelLayout::Gray }, usize::from(num_samples))
@@ -640,6 +674,7 @@ fn decode_ifd(f: &File<'_>, dir: &Ifd, limits: &Limits) -> Result<Image, CodecEr
         .and_then(|s| s.checked_mul(src.bytes()))
         .ok_or_else(|| CodecError::LimitExceeded("tile size".into()))?;
     let scratch_cap = chunk_bytes.saturating_mul(2).max(64 << 20).min(limits.alloc_usize());
+    let extra_at = extra_sample_indices(spp as usize, color, alpha_at, out_layout.has_alpha());
     let lay = Layout {
         w: wu,
         src,
@@ -656,6 +691,7 @@ fn decode_ifd(f: &File<'_>, dir: &Ifd, limits: &Limits) -> Result<Image, CodecEr
         premultiplied: out_layout.has_alpha() && alpha_at.and_then(|a| extra.get(a)) == Some(&1),
         palette,
         scratch_cap,
+        extra_at,
     };
 
     // The output, allocated once and fallibly.
@@ -664,15 +700,61 @@ fn decode_ifd(f: &File<'_>, dir: &Ifd, limits: &Limits) -> Result<Image, CodecEr
     let mut data = zeroed(len)?;
     let band_bytes = out_row.checked_mul(ch.min(hu)).ok_or_else(|| CodecError::LimitExceeded("band size".into()))?;
 
-    let tally = decode_bands(&lay, &mut data, band_bytes, &mut dec, &open)?;
+    let extra_row = lay.extra_row();
+    let extra_len = extra_row.checked_mul(hu).ok_or_else(|| CodecError::LimitExceeded("extra samples".into()))?;
+    let mut extra_data = if lay.extra_at.is_empty() { Vec::new() } else { zeroed(extra_len)? };
+    let extra_band = extra_row.saturating_mul(ch.min(hu));
+    let tally = decode_bands(&lay, &mut data, band_bytes, extra_data.as_mut_slice(), extra_band, &mut dec, &open)?;
     if tally.decoded == 0 && tally.missing > 0 {
         return Err(err("the image data is missing (cut off or past the end of the file)"));
     }
     let mut img = Image::from_raw(w, h, out_layout, out, data)?;
+    if !lay.extra_at.is_empty() {
+        let kind_of = |si: usize| si.checked_sub(color).and_then(|k| extra.get(k)).copied().unwrap_or(0) as u16;
+        img.meta.extra_samples = split_extra_samples(&extra_data, wu, hu, &lay.extra_at, out, kind_of);
+    }
     if tally.missing > 0 {
         img.warnings.push(DecodeWarning::Truncated { format: F });
     }
     Ok(img)
+}
+
+/// File sample indices that are not a colour channel and not the one alpha sample, capped at
+/// [`crate::MAX_EXTRA_SAMPLES`].
+fn extra_sample_indices(spp: usize, color: usize, alpha_at: Option<usize>, has_alpha: bool) -> Vec<usize> {
+    let mut used = vec![false; spp];
+    for i in 0..color.min(spp) {
+        if let Some(slot) = used.get_mut(i) {
+            *slot = true;
+        }
+    }
+    if has_alpha {
+        let a = alpha_at.map(|k| color.saturating_add(k)).unwrap_or(color);
+        if let Some(slot) = used.get_mut(a) {
+            *slot = true;
+        }
+    }
+    used.into_iter().enumerate().filter(|(_, on)| !*on).map(|(i, _)| i).take(crate::MAX_EXTRA_SAMPLES).collect()
+}
+
+/// Interleaved extra samples (`extra_at.len()` per pixel) → one plane per sample.
+fn split_extra_samples(buf: &[u8], w: usize, h: usize, at: &[usize], sample: SampleType, mut kind_of: impl FnMut(usize) -> u16) -> Vec<crate::ExtraSample> {
+    let b = sample.bytes();
+    let n = w.saturating_mul(h);
+    let spp = at.len();
+    let mut out = Vec::with_capacity(spp);
+    for (ei, &si) in at.iter().enumerate() {
+        let mut data = vec![0u8; n.saturating_mul(b)];
+        for i in 0..n {
+            let src = (i.saturating_mul(spp).saturating_add(ei)).saturating_mul(b);
+            let dst = i.saturating_mul(b);
+            if let (Some(s), Some(d)) = (buf.get(src..src.saturating_add(b)), data.get_mut(dst..dst.saturating_add(b))) {
+                d.copy_from_slice(s);
+            }
+        }
+        out.push(crate::ExtraSample { kind: kind_of(si), data });
+    }
+    out
 }
 
 /// A zero-filled buffer, allocated fallibly. On native targets the zeroing (and the first
@@ -707,20 +789,35 @@ impl std::ops::Add for Tally {
 }
 
 /// Decodes every band into `data`, in parallel on native targets (one decoder and scratch
-/// buffer per worker).
+/// buffer per worker). `extra` receives samples that are not part of the colour image, one
+/// band of rows at a time, when it is non-empty.
 #[cfg(not(target_arch = "wasm32"))]
-fn decode_bands<'a, O>(lay: &Layout, data: &mut [u8], band_bytes: usize, _first: &mut Decoder<Patched<'a>>, open: &O) -> Result<Tally, CodecError>
+fn decode_bands<'a, O>(lay: &Layout, data: &mut [u8], band_bytes: usize, extra: &mut [u8], extra_band: usize, _first: &mut Decoder<Patched<'a>>, open: &O) -> Result<Tally, CodecError>
 where
     O: Fn() -> Result<Decoder<Patched<'a>>, CodecError> + Sync,
 {
     use rayon::prelude::*;
+    if extra.is_empty() {
+        return data
+            .par_chunks_mut(band_bytes.max(1))
+            .enumerate()
+            .map_init(
+                || open().map(|d| (d, Vec::new())).map_err(|e| e.to_string()),
+                |worker, (b, band)| {
+                    let (dec, scratch) = worker.as_mut().map_err(|e| err(e.clone()))?;
+                    decode_band(lay, dec, scratch, b, band, None)
+                },
+            )
+            .try_reduce(Tally::default, |a, b| Ok(a + b));
+    }
     data.par_chunks_mut(band_bytes.max(1))
+        .zip(extra.par_chunks_mut(extra_band.max(1)))
         .enumerate()
         .map_init(
             || open().map(|d| (d, Vec::new())).map_err(|e| e.to_string()),
-            |worker, (b, band)| {
+            |worker, (b, (band, extra_band))| {
                 let (dec, scratch) = worker.as_mut().map_err(|e| err(e.clone()))?;
-                decode_band(lay, dec, scratch, b, band)
+                decode_band(lay, dec, scratch, b, band, Some(extra_band))
             },
         )
         .try_reduce(Tally::default, |a, b| Ok(a + b))
@@ -728,20 +825,26 @@ where
 
 /// Decodes every band into `data`, one after the other.
 #[cfg(target_arch = "wasm32")]
-fn decode_bands<'a, O>(lay: &Layout, data: &mut [u8], band_bytes: usize, first: &mut Decoder<Patched<'a>>, _open: &O) -> Result<Tally, CodecError>
+fn decode_bands<'a, O>(lay: &Layout, data: &mut [u8], band_bytes: usize, extra: &mut [u8], extra_band: usize, first: &mut Decoder<Patched<'a>>, _open: &O) -> Result<Tally, CodecError>
 where
     O: Fn() -> Result<Decoder<Patched<'a>>, CodecError> + Sync,
 {
     let mut scratch = Vec::new();
     let mut tally = Tally::default();
-    for (b, band) in data.chunks_mut(band_bytes.max(1)).enumerate() {
-        tally = tally + decode_band(lay, first, &mut scratch, b, band)?;
+    if extra.is_empty() {
+        for (b, band) in data.chunks_mut(band_bytes.max(1)).enumerate() {
+            tally = tally + decode_band(lay, first, &mut scratch, b, band, None)?;
+        }
+        return Ok(tally);
+    }
+    for (b, (band, extra_band)) in data.chunks_mut(band_bytes.max(1)).zip(extra.chunks_mut(extra_band.max(1))).enumerate() {
+        tally = tally + decode_band(lay, first, &mut scratch, b, band, Some(extra_band))?;
     }
     Ok(tally)
 }
 
 /// Decodes band `b` (one strip, or one row of tiles, in every plane) into its output rows.
-fn decode_band(lay: &Layout, dec: &mut Decoder<Patched<'_>>, scratch: &mut Vec<u8>, b: usize, band: &mut [u8]) -> Result<Tally, CodecError> {
+fn decode_band(lay: &Layout, dec: &mut Decoder<Patched<'_>>, scratch: &mut Vec<u8>, b: usize, band: &mut [u8], mut extra: Option<&mut [u8]>) -> Result<Tally, CodecError> {
     let out_row = lay.out_row();
     let rows = band.len() / out_row.max(1);
     let px = lay.out_channels() * lay.out.bytes();
@@ -783,14 +886,85 @@ fn decode_band(lay: &Layout, dec: &mut Decoder<Patched<'_>>, scratch: &mut Vec<u
             }
             let x0 = col * lay.cw;
             let n = lay.cw.min(lay.w.saturating_sub(x0));
-            for (src_row, dst_row) in buf.chunks_exact(stride).zip(band.chunks_exact_mut(out_row)).take(rows) {
+            for (ri, (src_row, dst_row)) in buf.chunks_exact(stride).zip(band.chunks_exact_mut(out_row)).take(rows).enumerate() {
                 let Some(dst) = dst_row.get_mut(x0 * px..(x0 + n) * px) else { continue };
                 convert_row(lay, src_row, dst, n, plane);
+                if !lay.planar && plane == 0 && !lay.extra_at.is_empty() {
+                    let erow = lay.extra_row();
+                    if let Some(extra) = extra.as_deref_mut()
+                        && let Some(er) = extra.get_mut(ri.saturating_mul(erow)..ri.saturating_mul(erow).saturating_add(erow))
+                    {
+                        deposit_extras(lay, src_row, er, n, x0);
+                    }
+                }
             }
         }
     }
+    if lay.planar && !lay.extra_at.is_empty() {
+        read_planar_extras(lay, dec, scratch, b, rows, extra.as_deref_mut(), &mut tally)?;
+    }
     finish_band(lay, band);
     Ok(tally)
+}
+
+/// Copies the non-colour samples of a chunky row into the extra-sample band.
+fn deposit_extras(lay: &Layout, src: &[u8], dst: &mut [u8], n: usize, x0: usize) {
+    let ech = lay.extra_at.len();
+    if ech == 0 {
+        return;
+    }
+    let px = ech * lay.out.bytes();
+    let Some(dst) = dst.get_mut(x0.saturating_mul(px)..(x0.saturating_add(n)).saturating_mul(px)) else { return };
+    for (ei, &si) in lay.extra_at.iter().enumerate() {
+        transfer(lay.src, src, lay.chunk_spp, si, dst, lay.out, ech, ei, n);
+    }
+}
+
+/// Planar files store each extra sample as its own plane. Read those planes into `extra`.
+fn read_planar_extras(lay: &Layout, dec: &mut Decoder<Patched<'_>>, scratch: &mut Vec<u8>, b: usize, rows: usize, extra: Option<&mut [u8]>, tally: &mut Tally) -> Result<(), CodecError> {
+    let Some(extra) = extra else { return Ok(()) };
+    let ech = lay.extra_at.len();
+    let erow = lay.extra_row();
+    if ech == 0 || erow == 0 {
+        return Ok(());
+    }
+    for (ei, &file_plane) in lay.extra_at.iter().enumerate() {
+        for col in 0..lay.across {
+            let chunk = file_plane
+                .checked_mul(lay.chunks_per_plane)
+                .and_then(|c| c.checked_add(b.checked_mul(lay.across)?))
+                .and_then(|c| c.checked_add(col))
+                .and_then(|c| u32::try_from(c).ok())
+                .ok_or_else(|| err("chunk index out of range"))?;
+            let pref = dec.image_chunk_buffer_layout(chunk).map_err(map_err)?;
+            let stride = pref.row_stride.map(|s| s.get()).ok_or_else(|| err("empty chunk row"))?;
+            if pref.len > lay.scratch_cap {
+                return Err(CodecError::LimitExceeded(format!("a {} byte strip or tile", pref.len)));
+            }
+            if scratch.len() < pref.len {
+                scratch.resize(pref.len, 0);
+            }
+            let buf = scratch.get_mut(..pref.len).ok_or_else(|| err("scratch buffer"))?;
+            match dec.read_chunk_bytes(chunk, buf) {
+                Ok(()) => tally.decoded += 1,
+                Err(e) if is_eof(&e) => {
+                    tally.missing += 1;
+                    continue;
+                }
+                Err(e) => return Err(map_err(e)),
+            }
+            let x0 = col * lay.cw;
+            let n = lay.cw.min(lay.w.saturating_sub(x0));
+            for (ri, src_row) in buf.chunks_exact(stride).take(rows).enumerate() {
+                let start = ri.saturating_mul(erow);
+                let Some(er) = extra.get_mut(start..start.saturating_add(erow)) else { continue };
+                let px = ech * lay.out.bytes();
+                let Some(dst) = er.get_mut(x0.saturating_mul(px)..(x0.saturating_add(n)).saturating_mul(px)) else { continue };
+                transfer(lay.src, src_row, 1, 0, dst, lay.out, ech, ei, n);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Converts `n` pixels of one decoded chunk row into output pixels (`plane` for planar data).
@@ -1014,12 +1188,218 @@ custom_colortype!(GrayA32F, f32, PI::BlackIsZero, &[32, 32], &[SampleFormat::IEE
 custom_colortype!(CmykA16, u16, PI::CMYK, &[16; 5], &[SampleFormat::Uint; 5], int);
 custom_colortype!(CmykA32F, f32, PI::CMYK, &[32; 5], &[SampleFormat::IEEEFP; 5], float);
 
+// Colour types with 1..=4 trailing extra samples (spot channels, extra alpha).
+custom_colortype!(Gray8E1, u8, PI::BlackIsZero, &[8u16; 2], &[SampleFormat::Uint; 2], int);
+custom_colortype!(Gray8E2, u8, PI::BlackIsZero, &[8u16; 3], &[SampleFormat::Uint; 3], int);
+custom_colortype!(Gray8E3, u8, PI::BlackIsZero, &[8u16; 4], &[SampleFormat::Uint; 4], int);
+custom_colortype!(Gray8E4, u8, PI::BlackIsZero, &[8u16; 5], &[SampleFormat::Uint; 5], int);
+custom_colortype!(Gray16E1, u16, PI::BlackIsZero, &[16u16; 2], &[SampleFormat::Uint; 2], int);
+custom_colortype!(Gray16E2, u16, PI::BlackIsZero, &[16u16; 3], &[SampleFormat::Uint; 3], int);
+custom_colortype!(Gray16E3, u16, PI::BlackIsZero, &[16u16; 4], &[SampleFormat::Uint; 4], int);
+custom_colortype!(Gray16E4, u16, PI::BlackIsZero, &[16u16; 5], &[SampleFormat::Uint; 5], int);
+custom_colortype!(Gray32FE1, f32, PI::BlackIsZero, &[32u16; 2], &[SampleFormat::IEEEFP; 2], float);
+custom_colortype!(Gray32FE2, f32, PI::BlackIsZero, &[32u16; 3], &[SampleFormat::IEEEFP; 3], float);
+custom_colortype!(Gray32FE3, f32, PI::BlackIsZero, &[32u16; 4], &[SampleFormat::IEEEFP; 4], float);
+custom_colortype!(Gray32FE4, f32, PI::BlackIsZero, &[32u16; 5], &[SampleFormat::IEEEFP; 5], float);
+custom_colortype!(GrayA8E1, u8, PI::BlackIsZero, &[8u16; 3], &[SampleFormat::Uint; 3], int);
+custom_colortype!(GrayA8E2, u8, PI::BlackIsZero, &[8u16; 4], &[SampleFormat::Uint; 4], int);
+custom_colortype!(GrayA8E3, u8, PI::BlackIsZero, &[8u16; 5], &[SampleFormat::Uint; 5], int);
+custom_colortype!(GrayA8E4, u8, PI::BlackIsZero, &[8u16; 6], &[SampleFormat::Uint; 6], int);
+custom_colortype!(GrayA16E1, u16, PI::BlackIsZero, &[16u16; 3], &[SampleFormat::Uint; 3], int);
+custom_colortype!(GrayA16E2, u16, PI::BlackIsZero, &[16u16; 4], &[SampleFormat::Uint; 4], int);
+custom_colortype!(GrayA16E3, u16, PI::BlackIsZero, &[16u16; 5], &[SampleFormat::Uint; 5], int);
+custom_colortype!(GrayA16E4, u16, PI::BlackIsZero, &[16u16; 6], &[SampleFormat::Uint; 6], int);
+custom_colortype!(GrayA32FE1, f32, PI::BlackIsZero, &[32u16; 3], &[SampleFormat::IEEEFP; 3], float);
+custom_colortype!(GrayA32FE2, f32, PI::BlackIsZero, &[32u16; 4], &[SampleFormat::IEEEFP; 4], float);
+custom_colortype!(GrayA32FE3, f32, PI::BlackIsZero, &[32u16; 5], &[SampleFormat::IEEEFP; 5], float);
+custom_colortype!(GrayA32FE4, f32, PI::BlackIsZero, &[32u16; 6], &[SampleFormat::IEEEFP; 6], float);
+custom_colortype!(Rgb8E1, u8, PI::RGB, &[8u16; 4], &[SampleFormat::Uint; 4], int);
+custom_colortype!(Rgb8E2, u8, PI::RGB, &[8u16; 5], &[SampleFormat::Uint; 5], int);
+custom_colortype!(Rgb8E3, u8, PI::RGB, &[8u16; 6], &[SampleFormat::Uint; 6], int);
+custom_colortype!(Rgb8E4, u8, PI::RGB, &[8u16; 7], &[SampleFormat::Uint; 7], int);
+custom_colortype!(Rgb16E1, u16, PI::RGB, &[16u16; 4], &[SampleFormat::Uint; 4], int);
+custom_colortype!(Rgb16E2, u16, PI::RGB, &[16u16; 5], &[SampleFormat::Uint; 5], int);
+custom_colortype!(Rgb16E3, u16, PI::RGB, &[16u16; 6], &[SampleFormat::Uint; 6], int);
+custom_colortype!(Rgb16E4, u16, PI::RGB, &[16u16; 7], &[SampleFormat::Uint; 7], int);
+custom_colortype!(Rgb32FE1, f32, PI::RGB, &[32u16; 4], &[SampleFormat::IEEEFP; 4], float);
+custom_colortype!(Rgb32FE2, f32, PI::RGB, &[32u16; 5], &[SampleFormat::IEEEFP; 5], float);
+custom_colortype!(Rgb32FE3, f32, PI::RGB, &[32u16; 6], &[SampleFormat::IEEEFP; 6], float);
+custom_colortype!(Rgb32FE4, f32, PI::RGB, &[32u16; 7], &[SampleFormat::IEEEFP; 7], float);
+custom_colortype!(Rgba8E1, u8, PI::RGB, &[8u16; 5], &[SampleFormat::Uint; 5], int);
+custom_colortype!(Rgba8E2, u8, PI::RGB, &[8u16; 6], &[SampleFormat::Uint; 6], int);
+custom_colortype!(Rgba8E3, u8, PI::RGB, &[8u16; 7], &[SampleFormat::Uint; 7], int);
+custom_colortype!(Rgba8E4, u8, PI::RGB, &[8u16; 8], &[SampleFormat::Uint; 8], int);
+custom_colortype!(Rgba16E1, u16, PI::RGB, &[16u16; 5], &[SampleFormat::Uint; 5], int);
+custom_colortype!(Rgba16E2, u16, PI::RGB, &[16u16; 6], &[SampleFormat::Uint; 6], int);
+custom_colortype!(Rgba16E3, u16, PI::RGB, &[16u16; 7], &[SampleFormat::Uint; 7], int);
+custom_colortype!(Rgba16E4, u16, PI::RGB, &[16u16; 8], &[SampleFormat::Uint; 8], int);
+custom_colortype!(Rgba32FE1, f32, PI::RGB, &[32u16; 5], &[SampleFormat::IEEEFP; 5], float);
+custom_colortype!(Rgba32FE2, f32, PI::RGB, &[32u16; 6], &[SampleFormat::IEEEFP; 6], float);
+custom_colortype!(Rgba32FE3, f32, PI::RGB, &[32u16; 7], &[SampleFormat::IEEEFP; 7], float);
+custom_colortype!(Rgba32FE4, f32, PI::RGB, &[32u16; 8], &[SampleFormat::IEEEFP; 8], float);
+custom_colortype!(Cmyk8E1, u8, PI::CMYK, &[8u16; 5], &[SampleFormat::Uint; 5], int);
+custom_colortype!(Cmyk8E2, u8, PI::CMYK, &[8u16; 6], &[SampleFormat::Uint; 6], int);
+custom_colortype!(Cmyk8E3, u8, PI::CMYK, &[8u16; 7], &[SampleFormat::Uint; 7], int);
+custom_colortype!(Cmyk8E4, u8, PI::CMYK, &[8u16; 8], &[SampleFormat::Uint; 8], int);
+custom_colortype!(Cmyk16E1, u16, PI::CMYK, &[16u16; 5], &[SampleFormat::Uint; 5], int);
+custom_colortype!(Cmyk16E2, u16, PI::CMYK, &[16u16; 6], &[SampleFormat::Uint; 6], int);
+custom_colortype!(Cmyk16E3, u16, PI::CMYK, &[16u16; 7], &[SampleFormat::Uint; 7], int);
+custom_colortype!(Cmyk16E4, u16, PI::CMYK, &[16u16; 8], &[SampleFormat::Uint; 8], int);
+custom_colortype!(Cmyk32FE1, f32, PI::CMYK, &[32u16; 5], &[SampleFormat::IEEEFP; 5], float);
+custom_colortype!(Cmyk32FE2, f32, PI::CMYK, &[32u16; 6], &[SampleFormat::IEEEFP; 6], float);
+custom_colortype!(Cmyk32FE3, f32, PI::CMYK, &[32u16; 7], &[SampleFormat::IEEEFP; 7], float);
+custom_colortype!(Cmyk32FE4, f32, PI::CMYK, &[32u16; 8], &[SampleFormat::IEEEFP; 8], float);
+custom_colortype!(CmykA8E1, u8, PI::CMYK, &[8u16; 6], &[SampleFormat::Uint; 6], int);
+custom_colortype!(CmykA8E2, u8, PI::CMYK, &[8u16; 7], &[SampleFormat::Uint; 7], int);
+custom_colortype!(CmykA8E3, u8, PI::CMYK, &[8u16; 8], &[SampleFormat::Uint; 8], int);
+custom_colortype!(CmykA8E4, u8, PI::CMYK, &[8u16; 9], &[SampleFormat::Uint; 9], int);
+custom_colortype!(CmykA16E1, u16, PI::CMYK, &[16u16; 6], &[SampleFormat::Uint; 6], int);
+custom_colortype!(CmykA16E2, u16, PI::CMYK, &[16u16; 7], &[SampleFormat::Uint; 7], int);
+custom_colortype!(CmykA16E3, u16, PI::CMYK, &[16u16; 8], &[SampleFormat::Uint; 8], int);
+custom_colortype!(CmykA16E4, u16, PI::CMYK, &[16u16; 9], &[SampleFormat::Uint; 9], int);
+custom_colortype!(CmykA32FE1, f32, PI::CMYK, &[32u16; 6], &[SampleFormat::IEEEFP; 6], float);
+custom_colortype!(CmykA32FE2, f32, PI::CMYK, &[32u16; 7], &[SampleFormat::IEEEFP; 7], float);
+custom_colortype!(CmykA32FE3, f32, PI::CMYK, &[32u16; 8], &[SampleFormat::IEEEFP; 8], float);
+custom_colortype!(CmykA32FE4, f32, PI::CMYK, &[32u16; 9], &[SampleFormat::IEEEFP; 9], float);
+
+
+fn bytes_as_u16(b: &[u8]) -> Vec<u16> {
+    b.chunks_exact(2).map(|c| u16::from_ne_bytes([c[0], c.get(1).copied().unwrap_or(0)])).collect()
+}
+
+fn bytes_as_f32(b: &[u8]) -> Vec<f32> {
+    b.chunks_exact(4)
+        .map(|c| f32::from_ne_bytes([c[0], c.get(1).copied().unwrap_or(0), c.get(2).copied().unwrap_or(0), c.get(3).copied().unwrap_or(0)]))
+        .collect()
+}
+
+/// Interleaves colour (and alpha) samples with [`Metadata::extra_samples`].
+fn interleave_extras(img: &Image) -> Result<Vec<u8>, String> {
+    let (w, h) = img.dimensions();
+    let n = (w as usize).checked_mul(h as usize).ok_or_else(|| "image size overflows".to_string())?;
+    let sb = img.sample_type().bytes();
+    let ch = img.layout().channels();
+    let extras = &img.meta.extra_samples;
+    let total = ch.checked_add(extras.len()).ok_or_else(|| "too many samples".to_string())?;
+    let px = total.checked_mul(sb).ok_or_else(|| "sample size overflows".to_string())?;
+    let mut out = vec![0u8; n.checked_mul(px).ok_or_else(|| "image size overflows".to_string())?];
+    let base = img.data();
+    let base_px = ch.saturating_mul(sb);
+    for i in 0..n {
+        let src = i.saturating_mul(base_px);
+        let dst = i.saturating_mul(px);
+        let Some(s) = base.get(src..src.saturating_add(base_px)) else {
+            return Err("image buffer is shorter than its dimensions".into());
+        };
+        let Some(d) = out.get_mut(dst..dst.saturating_add(base_px)) else {
+            return Err("extra-sample buffer is short".into());
+        };
+        d.copy_from_slice(s);
+        for (k, e) in extras.iter().enumerate() {
+            let es = i.saturating_mul(sb);
+            let ed = dst.saturating_add(base_px).saturating_add(k.saturating_mul(sb));
+            let Some(s) = e.data.get(es..es.saturating_add(sb)) else {
+                return Err(format!("extra sample {k} is shorter than the image"));
+            };
+            let Some(d) = out.get_mut(ed..ed.saturating_add(sb)) else {
+                return Err("extra-sample buffer is short".into());
+            };
+            d.copy_from_slice(s);
+        }
+    }
+    Ok(out)
+}
+
+fn write_with_extras<K: TiffKind>(enc: &mut TiffEncoder<&mut Cursor<Vec<u8>>, K>, img: &Image, tags: &TagSet<'_>) -> tiff::TiffResult<()> {
+    use ChannelLayout as L;
+    use SampleType as S;
+    let bytes = interleave_extras(img).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    let (w, h) = img.dimensions();
+    let n = img.meta.extra_samples.len();
+    match (img.layout(), img.sample_type(), n) {
+        (L::Gray, S::U8, 1) => write_one::<Gray8E1, K>(enc, w, h, &bytes, tags),
+        (L::Gray, S::U8, 2) => write_one::<Gray8E2, K>(enc, w, h, &bytes, tags),
+        (L::Gray, S::U8, 3) => write_one::<Gray8E3, K>(enc, w, h, &bytes, tags),
+        (L::Gray, S::U8, 4) => write_one::<Gray8E4, K>(enc, w, h, &bytes, tags),
+        (L::Gray, S::U16, 1) => { let v = bytes_as_u16(&bytes); write_one::<Gray16E1, K>(enc, w, h, &v, tags) }
+        (L::Gray, S::U16, 2) => { let v = bytes_as_u16(&bytes); write_one::<Gray16E2, K>(enc, w, h, &v, tags) }
+        (L::Gray, S::U16, 3) => { let v = bytes_as_u16(&bytes); write_one::<Gray16E3, K>(enc, w, h, &v, tags) }
+        (L::Gray, S::U16, 4) => { let v = bytes_as_u16(&bytes); write_one::<Gray16E4, K>(enc, w, h, &v, tags) }
+        (L::Gray, S::F32, 1) => { let v = bytes_as_f32(&bytes); write_one::<Gray32FE1, K>(enc, w, h, &v, tags) }
+        (L::Gray, S::F32, 2) => { let v = bytes_as_f32(&bytes); write_one::<Gray32FE2, K>(enc, w, h, &v, tags) }
+        (L::Gray, S::F32, 3) => { let v = bytes_as_f32(&bytes); write_one::<Gray32FE3, K>(enc, w, h, &v, tags) }
+        (L::Gray, S::F32, 4) => { let v = bytes_as_f32(&bytes); write_one::<Gray32FE4, K>(enc, w, h, &v, tags) }
+        (L::GrayA, S::U8, 1) => write_one::<GrayA8E1, K>(enc, w, h, &bytes, tags),
+        (L::GrayA, S::U8, 2) => write_one::<GrayA8E2, K>(enc, w, h, &bytes, tags),
+        (L::GrayA, S::U8, 3) => write_one::<GrayA8E3, K>(enc, w, h, &bytes, tags),
+        (L::GrayA, S::U8, 4) => write_one::<GrayA8E4, K>(enc, w, h, &bytes, tags),
+        (L::GrayA, S::U16, 1) => { let v = bytes_as_u16(&bytes); write_one::<GrayA16E1, K>(enc, w, h, &v, tags) }
+        (L::GrayA, S::U16, 2) => { let v = bytes_as_u16(&bytes); write_one::<GrayA16E2, K>(enc, w, h, &v, tags) }
+        (L::GrayA, S::U16, 3) => { let v = bytes_as_u16(&bytes); write_one::<GrayA16E3, K>(enc, w, h, &v, tags) }
+        (L::GrayA, S::U16, 4) => { let v = bytes_as_u16(&bytes); write_one::<GrayA16E4, K>(enc, w, h, &v, tags) }
+        (L::GrayA, S::F32, 1) => { let v = bytes_as_f32(&bytes); write_one::<GrayA32FE1, K>(enc, w, h, &v, tags) }
+        (L::GrayA, S::F32, 2) => { let v = bytes_as_f32(&bytes); write_one::<GrayA32FE2, K>(enc, w, h, &v, tags) }
+        (L::GrayA, S::F32, 3) => { let v = bytes_as_f32(&bytes); write_one::<GrayA32FE3, K>(enc, w, h, &v, tags) }
+        (L::GrayA, S::F32, 4) => { let v = bytes_as_f32(&bytes); write_one::<GrayA32FE4, K>(enc, w, h, &v, tags) }
+        (L::Rgb, S::U8, 1) => write_one::<Rgb8E1, K>(enc, w, h, &bytes, tags),
+        (L::Rgb, S::U8, 2) => write_one::<Rgb8E2, K>(enc, w, h, &bytes, tags),
+        (L::Rgb, S::U8, 3) => write_one::<Rgb8E3, K>(enc, w, h, &bytes, tags),
+        (L::Rgb, S::U8, 4) => write_one::<Rgb8E4, K>(enc, w, h, &bytes, tags),
+        (L::Rgb, S::U16, 1) => { let v = bytes_as_u16(&bytes); write_one::<Rgb16E1, K>(enc, w, h, &v, tags) }
+        (L::Rgb, S::U16, 2) => { let v = bytes_as_u16(&bytes); write_one::<Rgb16E2, K>(enc, w, h, &v, tags) }
+        (L::Rgb, S::U16, 3) => { let v = bytes_as_u16(&bytes); write_one::<Rgb16E3, K>(enc, w, h, &v, tags) }
+        (L::Rgb, S::U16, 4) => { let v = bytes_as_u16(&bytes); write_one::<Rgb16E4, K>(enc, w, h, &v, tags) }
+        (L::Rgb, S::F32, 1) => { let v = bytes_as_f32(&bytes); write_one::<Rgb32FE1, K>(enc, w, h, &v, tags) }
+        (L::Rgb, S::F32, 2) => { let v = bytes_as_f32(&bytes); write_one::<Rgb32FE2, K>(enc, w, h, &v, tags) }
+        (L::Rgb, S::F32, 3) => { let v = bytes_as_f32(&bytes); write_one::<Rgb32FE3, K>(enc, w, h, &v, tags) }
+        (L::Rgb, S::F32, 4) => { let v = bytes_as_f32(&bytes); write_one::<Rgb32FE4, K>(enc, w, h, &v, tags) }
+        (L::Rgba, S::U8, 1) => write_one::<Rgba8E1, K>(enc, w, h, &bytes, tags),
+        (L::Rgba, S::U8, 2) => write_one::<Rgba8E2, K>(enc, w, h, &bytes, tags),
+        (L::Rgba, S::U8, 3) => write_one::<Rgba8E3, K>(enc, w, h, &bytes, tags),
+        (L::Rgba, S::U8, 4) => write_one::<Rgba8E4, K>(enc, w, h, &bytes, tags),
+        (L::Rgba, S::U16, 1) => { let v = bytes_as_u16(&bytes); write_one::<Rgba16E1, K>(enc, w, h, &v, tags) }
+        (L::Rgba, S::U16, 2) => { let v = bytes_as_u16(&bytes); write_one::<Rgba16E2, K>(enc, w, h, &v, tags) }
+        (L::Rgba, S::U16, 3) => { let v = bytes_as_u16(&bytes); write_one::<Rgba16E3, K>(enc, w, h, &v, tags) }
+        (L::Rgba, S::U16, 4) => { let v = bytes_as_u16(&bytes); write_one::<Rgba16E4, K>(enc, w, h, &v, tags) }
+        (L::Rgba, S::F32, 1) => { let v = bytes_as_f32(&bytes); write_one::<Rgba32FE1, K>(enc, w, h, &v, tags) }
+        (L::Rgba, S::F32, 2) => { let v = bytes_as_f32(&bytes); write_one::<Rgba32FE2, K>(enc, w, h, &v, tags) }
+        (L::Rgba, S::F32, 3) => { let v = bytes_as_f32(&bytes); write_one::<Rgba32FE3, K>(enc, w, h, &v, tags) }
+        (L::Rgba, S::F32, 4) => { let v = bytes_as_f32(&bytes); write_one::<Rgba32FE4, K>(enc, w, h, &v, tags) }
+        (L::Cmyk, S::U8, 1) => write_one::<Cmyk8E1, K>(enc, w, h, &bytes, tags),
+        (L::Cmyk, S::U8, 2) => write_one::<Cmyk8E2, K>(enc, w, h, &bytes, tags),
+        (L::Cmyk, S::U8, 3) => write_one::<Cmyk8E3, K>(enc, w, h, &bytes, tags),
+        (L::Cmyk, S::U8, 4) => write_one::<Cmyk8E4, K>(enc, w, h, &bytes, tags),
+        (L::Cmyk, S::U16, 1) => { let v = bytes_as_u16(&bytes); write_one::<Cmyk16E1, K>(enc, w, h, &v, tags) }
+        (L::Cmyk, S::U16, 2) => { let v = bytes_as_u16(&bytes); write_one::<Cmyk16E2, K>(enc, w, h, &v, tags) }
+        (L::Cmyk, S::U16, 3) => { let v = bytes_as_u16(&bytes); write_one::<Cmyk16E3, K>(enc, w, h, &v, tags) }
+        (L::Cmyk, S::U16, 4) => { let v = bytes_as_u16(&bytes); write_one::<Cmyk16E4, K>(enc, w, h, &v, tags) }
+        (L::Cmyk, S::F32, 1) => { let v = bytes_as_f32(&bytes); write_one::<Cmyk32FE1, K>(enc, w, h, &v, tags) }
+        (L::Cmyk, S::F32, 2) => { let v = bytes_as_f32(&bytes); write_one::<Cmyk32FE2, K>(enc, w, h, &v, tags) }
+        (L::Cmyk, S::F32, 3) => { let v = bytes_as_f32(&bytes); write_one::<Cmyk32FE3, K>(enc, w, h, &v, tags) }
+        (L::Cmyk, S::F32, 4) => { let v = bytes_as_f32(&bytes); write_one::<Cmyk32FE4, K>(enc, w, h, &v, tags) }
+        (L::CmykA, S::U8, 1) => write_one::<CmykA8E1, K>(enc, w, h, &bytes, tags),
+        (L::CmykA, S::U8, 2) => write_one::<CmykA8E2, K>(enc, w, h, &bytes, tags),
+        (L::CmykA, S::U8, 3) => write_one::<CmykA8E3, K>(enc, w, h, &bytes, tags),
+        (L::CmykA, S::U8, 4) => write_one::<CmykA8E4, K>(enc, w, h, &bytes, tags),
+        (L::CmykA, S::U16, 1) => { let v = bytes_as_u16(&bytes); write_one::<CmykA16E1, K>(enc, w, h, &v, tags) }
+        (L::CmykA, S::U16, 2) => { let v = bytes_as_u16(&bytes); write_one::<CmykA16E2, K>(enc, w, h, &v, tags) }
+        (L::CmykA, S::U16, 3) => { let v = bytes_as_u16(&bytes); write_one::<CmykA16E3, K>(enc, w, h, &v, tags) }
+        (L::CmykA, S::U16, 4) => { let v = bytes_as_u16(&bytes); write_one::<CmykA16E4, K>(enc, w, h, &v, tags) }
+        (L::CmykA, S::F32, 1) => { let v = bytes_as_f32(&bytes); write_one::<CmykA32FE1, K>(enc, w, h, &v, tags) }
+        (L::CmykA, S::F32, 2) => { let v = bytes_as_f32(&bytes); write_one::<CmykA32FE2, K>(enc, w, h, &v, tags) }
+        (L::CmykA, S::F32, 3) => { let v = bytes_as_f32(&bytes); write_one::<CmykA32FE3, K>(enc, w, h, &v, tags) }
+        (L::CmykA, S::F32, 4) => { let v = bytes_as_f32(&bytes); write_one::<CmykA32FE4, K>(enc, w, h, &v, tags) }
+        _ => Err(io::Error::new(io::ErrorKind::InvalidInput, format!("unsupported extra samples ({n})")).into()),
+    }
+}
+
 struct TagSet<'a> {
     icc: Option<&'a [u8]>,
     xmp: Option<&'a [u8]>,
     dpi: Option<(f32, f32)>,
     text: Vec<(Tag, &'a str)>,
-    alpha: bool,
+    /// ExtraSamples tag, including the unassociated-alpha marker when the image has alpha.
+    extra_samples: &'a [u16],
     photoshop_resources: Option<&'a [u8]>,
     photoshop_layers: Option<&'a [u8]>,
 }
@@ -1039,9 +1419,8 @@ where
         im.y_resolution(Rational { n: (y * 1000.0).round() as u32, d: 1000 });
     }
     let d = im.encoder();
-    if tags.alpha {
-        // 2 = unassociated alpha
-        d.write_tag(Tag::ExtraSamples, &[2u16][..])?;
+    if !tags.extra_samples.is_empty() {
+        d.write_tag(Tag::ExtraSamples, tags.extra_samples)?;
     }
     if let Some(icc) = tags.icc {
         d.write_tag(Tag::IccProfile, Undefined(icc))?;
@@ -1065,6 +1444,9 @@ where
 fn write_image<K: TiffKind>(enc: &mut TiffEncoder<&mut Cursor<Vec<u8>>, K>, img: &Image, tags: &TagSet<'_>) -> tiff::TiffResult<()> {
     use ChannelLayout as L;
     use SampleType as S;
+    if !img.meta.extra_samples.is_empty() {
+        return write_with_extras::<K>(enc, img, tags);
+    }
     let (w, h) = img.dimensions();
     let u16s = || img.to_u16_samples().unwrap_or_default();
     let f32s = || img.to_f32_samples().unwrap_or_default();
@@ -1102,11 +1484,46 @@ fn estimated_size(img: &Image, tags: &TagSet<'_>) -> u64 {
     let text = tags.text.iter().map(|(_, s)| s.len() as u64).sum::<u64>();
     // Strip tables: one offset and one count per strip of about 1 MB.
     let tables = (img.data().len() as u64 / (1 << 20) + 1) * 16;
-    (img.data().len() as u64).saturating_add(payloads).saturating_add(text).saturating_add(tables).saturating_add(1 << 20)
+    let extras: u64 = img.meta.extra_samples.iter().map(|e| e.data.len() as u64).sum();
+    (img.data().len() as u64).saturating_add(extras).saturating_add(payloads).saturating_add(text).saturating_add(tables).saturating_add(1 << 20)
 }
 
 pub(crate) fn encode(src: &Image, plan: Plan, opts: &EncodeOptions) -> Result<Vec<u8>, CodecError> {
-    let img = src.converted(plan.layout, plan.sample);
+    let cow = src.converted(plan.layout, plan.sample);
+    if cow.sample_type() != src.sample_type() {
+        let mut owned = cow.into_owned();
+        adapt_extras(&mut owned, src.sample_type());
+        return encode_ready(&owned, opts);
+    }
+    encode_ready(&cow, opts)
+}
+
+fn adapt_extras(img: &mut Image, from: SampleType) {
+    let to = img.sample_type();
+    if from == to {
+        return;
+    }
+    let n = img.width() as usize * img.height() as usize;
+    for e in &mut img.meta.extra_samples {
+        e.data = retarget_plane(&e.data, from, to, n);
+    }
+}
+
+fn retarget_plane(data: &[u8], from: SampleType, to: SampleType, n: usize) -> Vec<u8> {
+    let mut vals = Vec::with_capacity(n);
+    for i in 0..n {
+        let have = i.saturating_mul(from.bytes()).saturating_add(from.bytes()) <= data.len();
+        vals.push(if have { crate::image::read_normalized(data, from, i) } else { 0.0 });
+    }
+    match to {
+        SampleType::U8 => vals.iter().map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8).collect(),
+        SampleType::U16 => vals.iter().flat_map(|v| ((v.clamp(0.0, 1.0) * 65535.0).round() as u16).to_ne_bytes()).collect(),
+        SampleType::F16 => vals.iter().flat_map(|v| f16::from_f32(*v).to_bits().to_ne_bytes()).collect(),
+        SampleType::F32 => vals.iter().flat_map(|v| v.to_ne_bytes()).collect(),
+    }
+}
+
+fn encode_ready(img: &Image, opts: &EncodeOptions) -> Result<Vec<u8>, CodecError> {
     let compression = match opts.tiff_compression {
         TiffCompression::None => tiff::encoder::Compression::Uncompressed,
         TiffCompression::Lzw => tiff::encoder::Compression::Lzw,
@@ -1130,12 +1547,22 @@ pub(crate) fn encode(src: &Image, plan: Plan, opts: &EncodeOptions) -> Result<Ve
     };
     // TIFF writes no Orientation tag (= 1): keep the XMP from contradicting it.
     let xmp = if opts.embed_metadata { img.meta.xmp.as_deref().map(|x| crate::resolution::export_xmp(x, img.meta.dpi)) } else { None };
+    if img.meta.extra_samples.len() > crate::MAX_EXTRA_SAMPLES {
+        return Err(CodecError::encode(F, format!("TIFF stores at most {} extra samples", crate::MAX_EXTRA_SAMPLES)));
+    }
+    let mut kinds = Vec::with_capacity(img.meta.extra_samples.len().saturating_add(1));
+    if img.layout().has_alpha() {
+        kinds.push(2);
+    }
+    for e in &img.meta.extra_samples {
+        kinds.push(e.kind);
+    }
     let tags = TagSet {
         icc: if opts.embed_icc { img.icc.as_deref() } else { None },
         xmp: xmp.as_deref().map(str::as_bytes),
         dpi: if opts.embed_metadata { img.meta.dpi.filter(|d| d.0 > 0.0 && d.1 > 0.0) } else { None },
         text,
-        alpha: img.layout().has_alpha(),
+        extra_samples: &kinds,
         // Document content, not metadata: written whenever present.
         photoshop_resources: img.meta.photoshop_resources.as_deref().filter(|r| !r.is_empty()),
         photoshop_layers: img.meta.photoshop_layers.as_deref().filter(|l| !l.is_empty()),

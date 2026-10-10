@@ -34,19 +34,18 @@ fn roundtrip(doc: &Document) -> Document {
     // The TIFF is a plain image to any other reader: the composite at the document's size.
     let flat = photocraft_codecs::decode(&r.bytes).expect("flat decode");
     assert_eq!(flat.dimensions(), (doc.size.width, doc.size.height));
-    // A TIFF holds one transparency channel: extra alpha channels (and a Quick Mask) are not
-    // kept, and the export says so.
+    // Extra alpha channels and a Quick Mask travel as TIFF extra samples (at most four).
     let extra = doc.channels.len() + usize::from(doc.quick_mask.is_some());
-    assert_eq!(r.warnings.iter().any(|w| w.contains("alpha channel(s) are not written")), extra > 0, "{:?}", r.warnings);
+    assert!(!r.warnings.iter().any(|w| w.contains("not written")), "{:?}", r.warnings);
+    if extra > 0 && extra <= photocraft_codecs::MAX_EXTRA_SAMPLES {
+        assert_eq!(flat.meta.extra_samples.len(), extra, "{:?}", r.warnings);
+    }
     import("x.tif", &r.bytes).expect("import").document
 }
 
-/// `doc` as a layered TIFF round trip returns it: without extra alpha channels or a Quick Mask.
+/// `doc` as a layered TIFF round trip returns it, including extra channels.
 fn expected(doc: &Document) -> Document {
-    let mut d = doc.clone();
-    d.channels.clear();
-    d.quick_mask = None;
-    d
+    doc.clone()
 }
 
 macro_rules! rt_case {
@@ -257,12 +256,11 @@ fn psdtags_fixtures_open_with_their_layers() {
         // tifffile writes a Software tag; nothing else is worth a warning.
         assert!(r.warnings.iter().all(|w| w.contains("text metadata")), "{name}: {:?}", r.warnings);
         // psdtags wrote the composite's alpha sample without the transparency flag, so by the
-        // PSD rules it is an alpha channel (which a re-save cannot keep). Re-saving keeps
-        // everything else; the file is then in the encoder's byte order.
+        // PSD rules it is an alpha channel. A re-save keeps it as a TIFF extra sample.
         assert_eq!(d.channels.len(), 1, "{name}");
         let out = tiff(d, true);
         let back = import(name, &out.bytes).unwrap().document;
-        assert_docs_eq(&expected(d), &back);
+        assert_docs_eq(d, &back);
     }
 }
 

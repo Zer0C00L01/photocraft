@@ -42,6 +42,36 @@ fn tags_round_trip_through_the_encoder() {
 }
 
 #[test]
+fn extra_samples_round_trip() {
+    for (layout, sample) in [
+        (ChannelLayout::Rgb, SampleType::U8),
+        (ChannelLayout::Rgba, SampleType::U8),
+        (ChannelLayout::Gray, SampleType::U16),
+        (ChannelLayout::Cmyk, SampleType::F32),
+    ] {
+        let mut img = synth(4, 3, layout, sample, 2, 0.4);
+        let n = 4 * 3;
+        let b = sample.bytes();
+        let data: Vec<u8> = (0..n * b).map(|i| (i * 17) as u8).collect();
+        img.meta.extra_samples = vec![ExtraSample { kind: 0, data: data.clone() }];
+        let bytes = encode(&img, Format::Tiff, &EncodeOptions::default()).unwrap();
+        let back = decode(&bytes).unwrap();
+        assert_eq!(back.layout(), layout, "{layout:?} {sample:?}");
+        assert_eq!(back.data(), img.data(), "{layout:?} {sample:?}");
+        assert_eq!(back.meta.extra_samples.len(), 1, "{layout:?} {sample:?}");
+        assert_eq!(back.meta.extra_samples[0].kind, 0, "{layout:?} {sample:?}");
+        assert_eq!(back.meta.extra_samples[0].data, data, "{layout:?} {sample:?}");
+    }
+}
+
+#[test]
+fn more_than_four_extra_samples_is_refused() {
+    let mut img = synth(2, 2, ChannelLayout::Rgb, SampleType::U8, 1, 0.0);
+    img.meta.extra_samples = (0..5).map(|_| ExtraSample { kind: 0, data: vec![0; 4] }).collect();
+    assert!(encode(&img, Format::Tiff, &EncodeOptions::default()).is_err());
+}
+
+#[test]
 fn absent_and_empty_tags_are_not_written() {
     let mut img = synth(4, 4, ChannelLayout::Rgb, SampleType::U8, 1, 0.0);
     let bytes = encode(&img, Format::Tiff, &EncodeOptions::default()).unwrap();

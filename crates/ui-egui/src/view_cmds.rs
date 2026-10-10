@@ -449,6 +449,7 @@ fn wraps(id: &str) -> bool {
             | "type.pasteLoremIpsum"
             | "image.applyImage"
             | "image.calculations"
+            | "image.dtf"
     )
 }
 
@@ -763,6 +764,10 @@ mod label_tests {
 
 /// Body of a `__form` dialog: text fields, number fields, checkboxes and `__choices` dropdowns.
 pub fn form_body(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
+    if let Some(note) = f.get("__note").and_then(Value::as_str) {
+        ui.label(note);
+        ui.add_space(6.0);
+    }
     let choices = f.get("__choices").cloned().unwrap_or(Value::Null);
     let keys: Vec<String> = f.keys().filter(|k| !k.starts_with("__")).cloned().collect();
     egui::Grid::new("form-dialog").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
@@ -1051,6 +1056,18 @@ fn front(app: &mut PhotocraftApp, id: &str, params: &Value) -> Option<Result<Val
                 ),
             }
         }
+        "image.dtf" => dialog(
+            app,
+            json!({
+                "__note": "Loads the active layer's transparency, contracts that selection, and fills a new spot channel. Save as PSD or TIFF so the RIP keeps the spot.",
+                "contract": photocraft_engine::dtf_cmds::DEFAULT_CONTRACT as i64,
+                "name": photocraft_engine::dtf_cmds::DEFAULT_NAME,
+                "color": photocraft_engine::dtf_cmds::DEFAULT_COLOR,
+                "solidity": photocraft_engine::dtf_cmds::DEFAULT_SOLIDITY as i64,
+                "applyAtCanvasBounds": false,
+            }),
+            Value::Null,
+        ),
         _ => None,
     }
 }

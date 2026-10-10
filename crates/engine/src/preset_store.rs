@@ -1082,6 +1082,9 @@ impl Session {
             }
             self.actions.rev = self.actions.rev.saturating_add(1).max(1);
         }
+        // The built-in DTF action is appended when the user doesn't already have one, then
+        // saved with the rest of the list.
+        crate::dtf_cmds::ensure_preset(self);
         self.brush_presets_changed();
         self.sync_preset_store();
         if let Some(st) = self.preset_store.as_mut() {
