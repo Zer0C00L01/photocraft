@@ -209,12 +209,25 @@ pub(crate) fn export_layered(doc: &Document, opts: &ExportOptions) -> Result<Exp
     let (file, w) = document_to_psd_with(doc, &psd_opts);
     warnings.extend(w);
     let order = if codecs::tiff_writes_little_endian() { ByteOrder::Little } else { ByteOrder::Big };
-    let (layers, w) = ImageSourceData::from_psd(&file).to_bytes(order)?;
+    // Photoshop and print RIPs ignore ExtraSamples values and pair every sample past the colour
+    // channels, in order, with alpha names / DisplayInfo. The merged transparency must not occupy
+    // that first slot when a spot is also stored, or the spot's name is attached to the alpha
+    // plane and the spot pixels themselves are left undescribed. Layer transparency stays in each
+    // layer's own channel; only the merged image omits it.
+    let mut isd = ImageSourceData::from_psd(&file);
+    let spot_extras = file.header.channels as usize > {
+        let cc = doc.pixel_format().mode.color_channels();
+        let alpha = file.layer_info.as_ref().is_some_and(|l| l.merged_alpha);
+        cc + usize::from(alpha)
+    };
+    if spot_extras && let Some(info) = &mut isd.layer_info {
+        info.merged_alpha = false;
+    }
+    let (layers, w) = isd.to_bytes(order)?;
     warnings.extend(w.into_iter().map(|w| format!("layer data: {w}")));
     // The profile and XMP are written as TIFF tags, not as resources. EXIF stays a resource
     // (1058): the TIFF codec has no EXIF directory, and the PSD importer reads it back from there.
-    let resources: Vec<ImageResource> = file.resources.iter().filter(|r| !matches!(r.id, ids::ICC_PROFILE | ids::XMP)).cloned().collect();
-    let resources = resources_to_bytes(&resources)?;
+    let mut resources: Vec<ImageResource> = file.resources.iter().filter(|r| !matches!(r.id, ids::ICC_PROFILE | ids::XMP)).cloned().collect();
 
     let fmt = doc.pixel_format();
     let cc = fmt.mode.color_channels();
@@ -225,12 +238,36 @@ pub(crate) fn export_layered(doc: &Document, opts: &ExportOptions) -> Result<Exp
     if extra_n > kept {
         warnings.push(format!("{extra_n} extra channels; TIFF keeps the first {kept}"));
     }
+    // With spot or alpha channels, the IFD image is colour + those channels. The merged
+    // transparency plane stays out of the IFD (see above); a file with no extra channels keeps
+    // it, so a plain transparent TIFF still opens with alpha.
+    let write_alpha = has_alpha && kept == 0;
+    // One identifier per extra sample actually stored, replacing any preserved 1053 whose count
+    // described the PSD merged image (which still included transparency).
+    if kept > 0 {
+        resources.retain(|r| r.id != crate::channel_map::ALPHA_IDENTIFIERS);
+        resources.push(ImageResource::new(crate::channel_map::ALPHA_IDENTIFIERS, crate::channel_map::alpha_identifiers(kept)));
+    }
+    // Resource 1022 names a channel of the PSD merged image, which counts the transparency plane.
+    // The IFD below does not, so the id moves back by one.
+    if has_alpha
+        && kept > 0
+        && let Some(r) = resources.iter_mut().find(|r| r.id == crate::channel_map::QUICK_MASK_INFO)
+        && r.data.len() >= 2
+    {
+        let id = u16::from_be_bytes([r.data[0], r.data[1]]).saturating_sub(1);
+        let be = id.to_be_bytes();
+        r.data[0] = be[0];
+        r.data[1] = be[1];
+    }
+    let resources = resources_to_bytes(&resources)?;
+    let ifd_channels = cc + usize::from(write_alpha);
     let sample = csample(fmt.sample);
     let (w, h) = (doc.size.width, doc.size.height);
     let cmyk = fmt.mode == ColorMode::Cmyk;
-    let data = interleave(&file.image_data.data, w, h, channels, cc, sample, cmyk)?;
+    let data = interleave(&file.image_data.data, w, h, ifd_channels, cc, sample, cmyk)?;
     let extras = native_extra_planes(&file.image_data.data, w, h, channels, kept, sample)?;
-    let layout = layout_for(fmt.mode, has_alpha);
+    let layout = layout_for(fmt.mode, write_alpha);
     let mut img = Image::from_raw(w, h, layout, sample, data)?;
     img.icc = doc.icc_profile.as_ref().map(|i| i.to_vec());
     img.meta = codecs::Metadata {
@@ -371,9 +408,42 @@ fn channel_plane(channel: &AlphaChannel, canvas: Rect, sample: CSample) -> Resul
     Ok(bytes)
 }
 
+/// Drops the straight alpha sample so `img` is colour channels only. Metadata is kept.
+/// `false` when there is no alpha or the buffer is not one sample per channel.
+fn strip_alpha(img: &mut Image) -> bool {
+    if !img.layout().has_alpha() {
+        return false;
+    }
+    let (w, h) = img.dimensions();
+    let sample = img.sample_type();
+    let dst = img.layout().without_alpha();
+    let bps = sample.bytes();
+    let keep = dst.channels().saturating_mul(bps);
+    let stride = img.layout().channels().saturating_mul(bps);
+    if stride == 0 || keep == 0 || !img.data().len().is_multiple_of(stride) {
+        return false;
+    }
+    let mut out = Vec::with_capacity(img.data().len() / stride * keep);
+    for px in img.data().chunks_exact(stride) {
+        let Some(color) = px.get(..keep) else { return false };
+        out.extend_from_slice(color);
+    }
+    let icc = img.icc.clone();
+    let meta = img.meta.clone();
+    let warnings = img.warnings.clone();
+    let Ok(mut next) = Image::from_raw(w, h, dst, sample, out) else { return false };
+    next.icc = icc;
+    next.meta = meta;
+    next.warnings = warnings;
+    *img = next;
+    true
+}
+
 /// Writes alpha and spot channels (and a Quick Mask) into a flat TIFF: extra samples in the
 /// IFD, plus Photoshop resources for the name, ink colour and solidity. At most
 /// [`codecs::MAX_EXTRA_SAMPLES`] are kept. A TIFF with no extra channels is left unchanged.
+/// When any are written, the composite's own transparency is left out of the IFD: readers pair
+/// the channel resources with every sample past the colour channels, in order.
 pub(crate) fn stamp_flat_channels(doc: &Document, img: &mut Image) -> Vec<String> {
     let total = doc.channels.len().saturating_add(usize::from(doc.quick_mask.is_some()));
     if total == 0 {
@@ -412,7 +482,12 @@ pub(crate) fn stamp_flat_channels(doc: &Document, img: &mut Image) -> Vec<String
     }
     let names: Vec<&str> = picked.iter().map(|c| c.name.as_str()).collect();
     let quick_last = matches!((picked.last(), doc.quick_mask.as_ref()), (Some(p), Some(q)) if std::ptr::eq(*p, q));
-    let quick_id = if quick_last { u16::try_from(img.layout().channels().saturating_add(picked.len()).saturating_sub(1)).ok() } else { None };
+    let color_channels = img.layout().color_channels();
+    if img.layout().has_alpha() && !strip_alpha(img) {
+        warnings.push("extra channels were not written: the composite transparency could not be separated from them".into());
+        return warnings;
+    }
+    let quick_id = if quick_last { u16::try_from(color_channels.saturating_add(picked.len()).saturating_sub(1)).ok() } else { None };
     match channel_resources(img.meta.photoshop_resources.as_deref(), &names, &picked, quick_id) {
         Ok(bytes) => img.meta.photoshop_resources = Some(bytes),
         Err(e) => warnings.push(format!("spot channel options were not written to the TIFF: {e}")),
@@ -427,10 +502,13 @@ fn channel_resources(existing: Option<&[u8]>, names: &[&str], channels: &[&Alpha
         Some(b) => resources_from_bytes(b)?.0,
         None => Vec::new(),
     };
-    resources.retain(|r| !matches!(r.id, 1006 | 1045 | crate::channel_map::DISPLAY_INFO | crate::channel_map::QUICK_MASK_INFO));
+    resources.retain(|r| {
+        !matches!(r.id, 1006 | 1045 | crate::channel_map::DISPLAY_INFO | crate::channel_map::QUICK_MASK_INFO | crate::channel_map::ALPHA_IDENTIFIERS)
+    });
     resources.push(ImageResource::new(1006, crate::psd_export::pascal_names_resource(names)));
     resources.push(ImageResource::new(1045, crate::psd_export::unicode_names_resource(names)));
     resources.push(ImageResource::new(crate::channel_map::DISPLAY_INFO, crate::channel_map::display_info(channels)));
+    resources.push(ImageResource::new(crate::channel_map::ALPHA_IDENTIFIERS, crate::channel_map::alpha_identifiers(names.len())));
     if let Some(id) = quick_id {
         let mut data = id.to_be_bytes().to_vec();
         data.push(0);

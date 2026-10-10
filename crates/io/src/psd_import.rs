@@ -18,7 +18,7 @@ use crate::blocks;
 use crate::pixels::{interleave, max_sample, sample_for_depth, zero_sample};
 
 /// Resources that are mapped to document fields or regenerated on export.
-pub(crate) const MAPPED_RESOURCES: [u16; 19] = [
+pub(crate) const MAPPED_RESOURCES: [u16; 20] = [
     ids::GLOBAL_ANGLE,
     ids::GLOBAL_ALTITUDE,
     ids::RESOLUTION_INFO,
@@ -38,6 +38,7 @@ pub(crate) const MAPPED_RESOURCES: [u16; 19] = [
     crate::channel_map::DISPLAY_INFO,
     crate::channel_map::DISPLAY_INFO_OLD,
     crate::channel_map::QUICK_MASK_INFO,
+    crate::channel_map::ALPHA_IDENTIFIERS,
 ];
 
 /// Blocks regenerated from document fields on export; not kept in

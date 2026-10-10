@@ -1608,3 +1608,19 @@ fn encode_ready(img: &Image, opts: &EncodeOptions) -> Result<Vec<u8>, CodecError
         Err(e) => Err(CodecError::encode(F, e)),
     }
 }
+
+#[cfg(test)]
+mod bits_len {
+    use super::Extras;
+    use tiff::encoder::colortype::ColorType as TiffColorType;
+
+    #[test]
+    fn const_generic_sample_tables_have_one_entry_per_sample() {
+        // A repeat expression in an associated const (`&[BITS; N]`) has, on some compilers,
+        // promoted to a slice shorter than `N`. The encoder sizes every strip from that length.
+        assert_eq!(<Extras<u8, 2, 8, 4> as TiffColorType>::BITS_PER_SAMPLE.len(), 4, "{:?}", <Extras<u8, 2, 8, 4> as TiffColorType>::BITS_PER_SAMPLE);
+        assert_eq!(<Extras<u8, 2, 8, 5> as TiffColorType>::BITS_PER_SAMPLE.len(), 5);
+        assert_eq!(<Extras<u8, 2, 8, 19> as TiffColorType>::BITS_PER_SAMPLE.len(), 19);
+        assert_eq!(<Extras<u16, 5, 16, 6> as TiffColorType>::SAMPLE_FORMAT.len(), 6);
+    }
+}

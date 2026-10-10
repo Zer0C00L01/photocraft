@@ -349,6 +349,227 @@ fn damaged_layer_data_opens_flattened() {
     }
 }
 
+/// Every sample of a TIFF, read by the `tiff` crate rather than PhotoCraft's decoder.
+///
+/// That decoder drops unspecified extra samples when the photometric interpretation is RGB, so
+/// the file is retagged MinIsBlack first. The result is then a multiband image of every sample,
+/// which is what libtiff's `TIFFReadScanline` returns and what a RIP walks.
+fn independent_samples(bytes: &[u8]) -> (u16, Vec<u16>, Vec<u16>, u32, Vec<u8>) {
+    let mut tags = tiff::decoder::Decoder::new(std::io::Cursor::new(bytes)).expect("tiff tags");
+    let spp: u16 = tags.get_tag_unsigned(tiff::tags::Tag::SamplesPerPixel).expect("spp");
+    let bps = tags.get_tag_u16_vec(tiff::tags::Tag::BitsPerSample).expect("bps");
+    let extra = tags.get_tag_u16_vec(tiff::tags::Tag::ExtraSamples).unwrap_or_default();
+    let rows = tags.find_tag_unsigned::<u32>(tiff::tags::Tag::RowsPerStrip).ok().flatten().unwrap_or(0);
+    let patched = photometric_min_is_black(bytes);
+    let mut dec = tiff::decoder::Decoder::new(std::io::Cursor::new(patched.as_slice())).expect("tiff decode");
+    let tiff::decoder::DecodingResult::U8(samples) = dec.read_image().expect("read image") else {
+        panic!("expected 8-bit samples");
+    };
+    (spp, bps, extra, rows, samples)
+}
+
+/// Classic-TIFF photometric tag 262 → 1 (MinIsBlack), value stored inline in the IFD entry.
+fn photometric_min_is_black(src: &[u8]) -> Vec<u8> {
+    let mut bytes = src.to_vec();
+    let le = bytes.first().copied() == Some(b'I');
+    let ru16 = |b: &[u8], i: usize| -> Option<u16> {
+        let s = b.get(i..i + 2)?;
+        Some(if le { u16::from_le_bytes([s[0], s[1]]) } else { u16::from_be_bytes([s[0], s[1]]) })
+    };
+    let ru32 = |b: &[u8], i: usize| -> Option<u32> {
+        let s = b.get(i..i + 4)?;
+        Some(if le { u32::from_le_bytes(s.try_into().ok()?) } else { u32::from_be_bytes(s.try_into().ok()?) })
+    };
+    let Some(ifd) = ru32(&bytes, 4) else { return bytes };
+    let Some(n) = ru16(&bytes, ifd as usize) else { return bytes };
+    for e in 0..n as usize {
+        let at = ifd as usize + 2 + e * 12;
+        if ru16(&bytes, at) == Some(262) {
+            let value = if le { 1u16.to_le_bytes() } else { 1u16.to_be_bytes() };
+            if let Some(slot) = bytes.get_mut(at + 8..at + 10) {
+                slot.copy_from_slice(&value);
+            }
+            break;
+        }
+    }
+    bytes
+}
+
+fn assert_plane(samples: &[u8], spp: usize, plane: usize, expected: &[u8]) {
+    assert_eq!(samples.len(), expected.len().saturating_mul(spp));
+    let mut bad = 0usize;
+    let mut first = None;
+    for (i, want) in expected.iter().enumerate() {
+        let got = samples.get(i * spp + plane).copied();
+        if got != Some(*want) {
+            bad += 1;
+            first.get_or_insert((i, got));
+        }
+    }
+    assert_eq!(bad, 0, "{bad} mismatches, first {first:?}");
+}
+
+/// A multi-layer transparent document, large enough for several TIFF strips and several
+/// raster tiles, with a spot whose every pixel is a known value.
+#[test]
+fn dtf_like_spot_is_written_in_full() {
+    use photocraft_color::{Color, PixelFormat};
+    use photocraft_doc::{AlphaChannel, Layer};
+    use photocraft_geom::{Rect, Size};
+    use photocraft_psd::tiff::resources_from_bytes;
+    use photocraft_raster::Surface;
+
+    let (w, h) = (900u32, 360u32);
+    let mut doc = Document::new("dtf", Size::new(w, h), ColorMode::Rgb, SampleType::U8);
+    let fmt = doc.pixel_format();
+    let mut art = Surface::new(fmt);
+    let px = photocraft_raster::from_rgba(&fmt, [0.2, 0.5, 0.9, 1.0]);
+    art.fill_rect(Rect::new(30, 20, 870, 340), &px);
+    doc.layers.push(Layer::new("Art", LayerContent::Raster(art)));
+    let mut ink = Surface::new(fmt);
+    let px = photocraft_raster::from_rgba(&fmt, [0.9, 0.1, 0.2, 0.5]);
+    ink.fill_rect(Rect::new(80, 40, 700, 300), &px);
+    let mut layer = Layer::new("Ink", LayerContent::Raster(ink));
+    layer.opacity = 0.8;
+    doc.layers.push(layer);
+
+    let n = (w as usize) * (h as usize);
+    let mut spot_bytes = vec![0u8; n];
+    for y in 0..h as usize {
+        for x in 0..w as usize {
+            spot_bytes[y * w as usize + x] = ((x * 3 + y * 17) % 251) as u8;
+        }
+    }
+    // Outside the artwork the composite is transparent, but the spot is not zero: a reader that
+    // binds "Spot Color 1" to the alpha plane fails here.
+    assert_eq!(spot_bytes[10 * w as usize + 10], 200);
+    let gray = PixelFormat::new(ColorMode::Grayscale, SampleType::U8, false);
+    let spot_surface = Surface::from_interleaved(gray, Rect::new(0, 0, w as i32, h as i32), &spot_bytes);
+    let mut channel = AlphaChannel::new("Spot Color 1", spot_surface);
+    channel.spot = Some((Color::rgb(1.0, 0.0, 0.0), 0.6));
+    doc.channels.push(channel);
+
+    let mut seen = Vec::new();
+    for (name, layers) in [("flat", false), ("layered", true)] {
+        let opts = ExportOptions { tiff_layers: layers, ..ExportOptions::default() };
+        let r = export(&doc, "dtf.tif", &opts).unwrap();
+        assert!(!r.warnings.iter().any(|w| w.contains("not written")), "{name}: {:?}", r.warnings);
+        let img = photocraft_codecs::decode(&r.bytes).unwrap();
+        assert!(!img.layout().has_alpha(), "{name}: {:?}", img.layout());
+        assert_eq!(img.layout().color_channels(), 3, "{name}");
+        assert_eq!(img.meta.extra_samples.len(), 1, "{name}");
+        assert_eq!(img.meta.extra_samples[0].kind, 0, "{name}");
+        assert_eq!(img.meta.extra_samples[0].data, spot_bytes, "{name} own decoder");
+
+        let (spp, bps, extra, rows, samples) = independent_samples(&r.bytes);
+        assert_eq!(spp, 4, "{name}");
+        assert_eq!(bps, vec![8, 8, 8, 8], "{name}");
+        assert_eq!(extra, vec![0], "{name} ExtraSamples");
+        assert!(rows > 0 && rows < h, "{name} rows_per_strip {rows}");
+        assert_plane(&samples, 4, 3, &spot_bytes);
+        seen.push(samples);
+
+        let (resources, layer_tag) = tags(&r.bytes);
+        let resources = resources.expect("photoshop resources");
+        let (blocks, warnings) = resources_from_bytes(&resources).unwrap();
+        assert!(warnings.is_empty(), "{name} {warnings:?}");
+        let block = |id: u16| blocks.iter().find(|b| b.id == id).unwrap_or_else(|| panic!("{name} missing {id}"));
+        // "Spot Color 1" is 12 bytes: length byte + text is odd, so resource 1006 pads to even.
+        assert_eq!(block(1006).data.len(), 14, "{name}");
+        assert_eq!(block(1045).data.len(), 30, "{name}");
+        let info = &block(1077).data;
+        assert_eq!(info.len(), 18, "{name}");
+        assert_eq!(u16::from_be_bytes([info[14], info[15]]), 60, "{name} solidity");
+        assert_eq!(info[16], 2, "{name} spot kind");
+        assert_eq!(block(1053).data, 1u32.to_be_bytes(), "{name} channel id");
+
+        let back = import("dtf.tif", &r.bytes).unwrap().document;
+        assert_eq!(back.channels.len(), 1, "{name}");
+        assert_eq!(back.channels[0].name, "Spot Color 1");
+        let (ink, sol) = back.channels[0].spot.expect("spot");
+        assert_eq!(ink.to_rgb(), [1.0, 0.0, 0.0], "{name}");
+        assert!((sol - 0.6).abs() < 1e-4, "{name}");
+        let area = Rect::new(0, 0, w as i32, h as i32);
+        assert_eq!(back.channels[0].surface.to_interleaved(area), spot_bytes, "{name} reimport");
+        if layers {
+            let layer_tag = layer_tag.expect("layer tag");
+            let (isd, w) = ImageSourceData::from_bytes(&layer_tag).unwrap();
+            assert!(w.is_empty(), "{w:?}");
+            assert!(!isd.layer_info.expect("layers").merged_alpha, "{name}");
+            assert_eq!(back.layers.len(), 2, "{name}");
+            let ink = back.layers.iter().find(|l| l.name == "Ink").expect("ink layer");
+            let px = ink.surface().expect("ink pixels").pixel(100, 100);
+            assert!((px[3] - 0.5).abs() < 0.02, "{name} layer alpha {px:?}");
+            let outside = ink.surface().expect("ink pixels").pixel(0, 0);
+            assert!(outside[3] < 0.02, "{name} transparent pixel {outside:?}");
+        } else {
+            assert!(layer_tag.is_none(), "{name}");
+        }
+    }
+    assert_eq!(seen[0], seen[1], "flat and layered IFD samples differ");
+}
+
+/// A transparent document with no user channels still stores image alpha.
+#[test]
+fn transparent_tiff_without_channels_keeps_image_alpha() {
+    use photocraft_doc::Layer;
+    use photocraft_geom::{Rect, Size};
+    use photocraft_raster::Surface;
+
+    let mut doc = Document::new("t", Size::new(8, 8), ColorMode::Rgb, SampleType::U8);
+    let fmt = doc.pixel_format();
+    let mut art = Surface::new(fmt);
+    art.fill_rect(Rect::new(1, 1, 6, 6), &photocraft_raster::from_rgba(&fmt, [1.0, 0.0, 0.0, 0.5]));
+    doc.layers.push(Layer::new("Art", LayerContent::Raster(art)));
+    for layers in [false, true] {
+        let r = export(&doc, "t.tif", &ExportOptions { tiff_layers: layers, ..ExportOptions::default() }).unwrap();
+        let img = photocraft_codecs::decode(&r.bytes).unwrap();
+        assert!(img.layout().has_alpha(), "{layers}");
+        assert!(img.meta.extra_samples.is_empty(), "{layers}");
+        let mut dec = tiff::decoder::Decoder::new(std::io::Cursor::new(r.bytes.as_slice())).unwrap();
+        let extra = dec.get_tag_u16_vec(tiff::tags::Tag::ExtraSamples).unwrap();
+        assert_eq!(extra, vec![2], "{layers}");
+    }
+}
+
+/// Quick Mask stays the last channel after the merged transparency plane is omitted.
+#[test]
+fn spot_tiff_keeps_quick_mask_when_composite_alpha_is_omitted() {
+    use photocraft_color::{Color, PixelFormat};
+    use photocraft_doc::{AlphaChannel, Layer};
+    use photocraft_geom::{Rect, Size};
+    use photocraft_raster::Surface;
+
+    let mut doc = Document::new("q", Size::new(8, 8), ColorMode::Rgb, SampleType::U8);
+    let fmt = doc.pixel_format();
+    let mut art = Surface::new(fmt);
+    art.fill_rect(Rect::new(1, 1, 6, 6), &photocraft_raster::from_rgba(&fmt, [1.0, 0.0, 0.0, 0.5]));
+    doc.layers.push(Layer::new("Art", LayerContent::Raster(art)));
+    let gray = PixelFormat::new(ColorMode::Grayscale, SampleType::U8, false);
+    let area = Rect::new(0, 0, 8, 8);
+    let mut spot_bytes = vec![9u8; 64];
+    spot_bytes[0] = 3;
+    let mut channel = AlphaChannel::new("Spot Color 1", Surface::from_interleaved(gray, area, &spot_bytes));
+    channel.spot = Some((Color::rgb(1.0, 0.0, 0.0), 0.6));
+    doc.channels.push(channel);
+    let mut qbytes = vec![7u8; 64];
+    qbytes[1] = 4;
+    doc.quick_mask = Some(AlphaChannel::new("Quick Mask", Surface::from_interleaved(gray, area, &qbytes)));
+
+    for layers in [false, true] {
+        let r = export(&doc, "q.tif", &ExportOptions { tiff_layers: layers, ..ExportOptions::default() }).unwrap();
+        let (spp, _bps, extra, _rows, samples) = independent_samples(&r.bytes);
+        assert_eq!((spp, extra.as_slice()), (5, [0, 0].as_slice()), "{layers}");
+        assert_plane(&samples, 5, 3, &spot_bytes);
+        assert_plane(&samples, 5, 4, &qbytes);
+        let back = import("q.tif", &r.bytes).unwrap().document;
+        assert_eq!(back.channels.len(), 1, "{layers}");
+        assert_eq!(back.channels[0].surface.to_interleaved(area), spot_bytes, "{layers}");
+        let qm = back.quick_mask.as_ref().unwrap_or_else(|| panic!("{layers}: no quick mask"));
+        assert_eq!(qm.surface.to_interleaved(area), qbytes, "{layers}");
+    }
+}
+
 #[test]
 fn default_export_options_write_a_flat_tiff() {
     // Scripted and agent saves (CLI, batch, MCP) build on the defaults: layers only on request.

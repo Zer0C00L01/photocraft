@@ -64,6 +64,93 @@ fn extra_samples_round_trip() {
     }
 }
 
+/// Tall enough that the default strip size (about 1 MB) cannot hold every row, so a writer
+/// that only fills the first strip, or predicts across the wrong sample count, cannot hide.
+/// The spot plane is checked with the `tiff` crate, not PhotoCraft's decoder.
+#[test]
+fn multi_strip_spot_round_trip_and_dump() {
+    let w = 800u32;
+    let h = 400u32;
+    let n = (w as usize) * (h as usize);
+    for (layout, channels) in [(ChannelLayout::Rgb, 3usize), (ChannelLayout::Rgba, 4usize)] {
+        let mut px = vec![0u8; n * channels];
+        let mut spot = vec![0u8; n];
+        for y in 0..h as usize {
+            for x in 0..w as usize {
+                let i = y * w as usize + x;
+                px[i * channels] = (x % 251) as u8;
+                px[i * channels + 1] = (y % 251) as u8;
+                px[i * channels + 2] = 40;
+                if channels == 4 {
+                    px[i * channels + 3] = if x > 20 && x < 780 && y > 10 && y + 10 < h as usize { 255 } else { 0 };
+                }
+                spot[i] = ((x * 3 + y * 17) % 251) as u8;
+            }
+        }
+        let mut img = Image::from_u8(w, h, layout, px).unwrap();
+        img.meta.extra_samples = vec![ExtraSample { kind: 0, data: spot.clone() }];
+        for compression in [TiffCompression::None, TiffCompression::Deflate, TiffCompression::Lzw, TiffCompression::PackBits] {
+            let bytes = encode(&img, Format::Tiff, &EncodeOptions { tiff_compression: compression, ..Default::default() }).unwrap();
+            let label = format!("{layout:?} {compression:?}");
+            let back = decode(&bytes).unwrap();
+            assert_eq!(back.meta.extra_samples.len(), 1, "{label}");
+            assert_eq!(back.meta.extra_samples[0].data, spot, "own decoder {label}");
+            assert_eq!(back.data(), img.data(), "own decoder rgb {label}");
+            let mut dec = tiff::decoder::Decoder::new(std::io::Cursor::new(bytes.as_slice())).unwrap();
+            let spp: u16 = dec.get_tag_unsigned(tiff::tags::Tag::SamplesPerPixel).unwrap();
+            let bps = dec.get_tag_u16_vec(tiff::tags::Tag::BitsPerSample).unwrap();
+            let extra = dec.get_tag_u16_vec(tiff::tags::Tag::ExtraSamples).unwrap();
+            let rows = dec.find_tag_unsigned::<u32>(tiff::tags::Tag::RowsPerStrip).unwrap();
+            assert_eq!(bps.len(), spp as usize, "{label}");
+            assert_eq!(spp as usize, channels + 1, "{label}");
+            assert_eq!(*extra.last().unwrap(), 0, "{label} spot ExtraSamples {extra:?}");
+            assert!(rows.is_some_and(|r| r < h) || compression == TiffCompression::PackBits, "{label} rows {rows:?}");
+            let patched = min_is_black(&bytes);
+            let mut indep = tiff::decoder::Decoder::new(std::io::Cursor::new(patched.as_slice())).unwrap();
+            let tiff::decoder::DecodingResult::U8(samples) = indep.read_image().unwrap() else { panic!("{label} not u8") };
+            let spp = spp as usize;
+            assert_eq!(samples.len(), n * spp, "{label}");
+            let mut bad = 0usize;
+            let mut first = None;
+            for (i, want) in spot.iter().enumerate() {
+                let got = samples.get(i * spp + spp - 1).copied();
+                if got != Some(*want) {
+                    bad += 1;
+                    first.get_or_insert((i, got));
+                }
+            }
+            assert_eq!(bad, 0, "{label} independent reader, first {first:?}");
+        }
+    }
+}
+
+/// Retag photometric interpretation 262 as MinIsBlack so `tiff`'s decoder returns every sample.
+fn min_is_black(src: &[u8]) -> Vec<u8> {
+    let mut bytes = src.to_vec();
+    let le = bytes.first().copied() == Some(b'I');
+    let ru16 = |b: &[u8], i: usize| -> Option<u16> {
+        let s = b.get(i..i + 2)?;
+        Some(if le { u16::from_le_bytes([s[0], s[1]]) } else { u16::from_be_bytes([s[0], s[1]]) })
+    };
+    let ru32 = |b: &[u8], i: usize| -> Option<u32> {
+        let s = b.get(i..i + 4)?;
+        Some(if le { u32::from_le_bytes(s.try_into().ok()?) } else { u32::from_be_bytes(s.try_into().ok()?) })
+    };
+    let Some(ifd) = ru32(&bytes, 4) else { return bytes };
+    let Some(n) = ru16(&bytes, ifd as usize) else { return bytes };
+    for e in 0..n as usize {
+        let at = ifd as usize + 2 + e * 12;
+        if ru16(&bytes, at) == Some(262) {
+            let value = if le { 1u16.to_le_bytes() } else { 1u16.to_be_bytes() };
+            if let Some(slot) = bytes.get_mut(at + 8..at + 10) {
+                slot.copy_from_slice(&value);
+            }
+            break;
+        }
+    }
+    bytes
+}
+
 #[test]
 fn more_than_sixteen_extra_samples_is_refused() {
     let mut img = synth(2, 2, ChannelLayout::Rgb, SampleType::U8, 1, 0.0);

@@ -13,11 +13,24 @@ pub(crate) const DISPLAY_INFO: u16 = 1077;
 pub(crate) const DISPLAY_INFO_OLD: u16 = 1007;
 /// Quick Mask information: channel id (u16) and an "initially empty" flag (u8).
 pub(crate) const QUICK_MASK_INFO: u16 = 1022;
+/// Alpha channel identifiers (Photoshop 6): one big-endian u32 per extra channel, no count prefix.
+pub(crate) const ALPHA_IDENTIFIERS: u16 = 1053;
 
 const SPACE_RGB: u16 = 0;
 const SPACE_CMYK: u16 = 2;
 const SPACE_LAB: u16 = 7;
 const SPACE_GRAY: u16 = 8;
+
+/// Resource 1053: channel ids `1..=count`, one big-endian u32 each, with no length prefix.
+/// Photoshop, ag-psd and psd-tools read u32s until the resource ends.
+pub(crate) fn alpha_identifiers(count: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(count.saturating_mul(4));
+    for i in 0..count {
+        let id = u32::try_from(i.saturating_add(1)).unwrap_or(u32::MAX);
+        out.extend_from_slice(&id.to_be_bytes());
+    }
+    out
+}
 
 /// Resource 1077 for `channels` (in file order).
 pub(crate) fn display_info(channels: &[&AlphaChannel]) -> Vec<u8> {
@@ -105,6 +118,8 @@ mod tests {
         assert!((back[0].opacity - 0.3).abs() < 1e-6);
         assert_eq!(back[0].indicates, ColorIndicates::SelectedAreas);
         assert_eq!(back[1].spot, s.spot);
+        assert_eq!(alpha_identifiers(2), [0, 0, 0, 1, 0, 0, 0, 2]);
+        assert!(alpha_identifiers(0).is_empty());
         // Truncated data is ignored rather than misread.
         let mut c = vec![AlphaChannel::new("x", Surface::new(PixelFormat::GRAY8))];
         apply_display_info(&bytes[..10], true, &mut c);

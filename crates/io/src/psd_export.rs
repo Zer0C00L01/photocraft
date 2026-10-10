@@ -1042,8 +1042,13 @@ pub(crate) fn pascal_names_resource(names: &[&str]) -> Vec<u8> {
     let mut v = Vec::new();
     for n in names {
         let b = legacy_name(n);
-        v.push(b.len() as u8);
-        v.extend_from_slice(&b);
+        let n = b.len().min(255);
+        v.push(n as u8);
+        v.extend_from_slice(&b[..n]);
+        // Each Pascal string is padded so the length byte plus the text is even (PSD resource 1006).
+        if (1 + n) % 2 == 1 {
+            v.push(0);
+        }
     }
     v
 }
@@ -1394,6 +1399,7 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32) -
         resources.push(ImageResource::new(1006, pascal_names_resource(&names)));
         resources.push(ImageResource::new(1045, unicode_names_resource(&names)));
         resources.push(ImageResource::new(crate::channel_map::DISPLAY_INFO, crate::channel_map::display_info(&extra)));
+        resources.push(ImageResource::new(crate::channel_map::ALPHA_IDENTIFIERS, crate::channel_map::alpha_identifiers(extra.len())));
     }
     if let Some(id) = quick_mask_id {
         let mut data = id.to_be_bytes().to_vec();
