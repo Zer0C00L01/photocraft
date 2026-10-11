@@ -18,7 +18,7 @@ use crate::blocks;
 use crate::pixels::{interleave, max_sample, sample_for_depth, zero_sample};
 
 /// Resources that are mapped to document fields or regenerated on export.
-pub(crate) const MAPPED_RESOURCES: [u16; 19] = [
+pub(crate) const MAPPED_RESOURCES: [u16; 20] = [
     ids::GLOBAL_ANGLE,
     ids::GLOBAL_ALTITUDE,
     ids::RESOLUTION_INFO,
@@ -38,6 +38,7 @@ pub(crate) const MAPPED_RESOURCES: [u16; 19] = [
     crate::channel_map::DISPLAY_INFO,
     crate::channel_map::DISPLAY_INFO_OLD,
     crate::channel_map::QUICK_MASK_INFO,
+    crate::channel_map::ALPHA_IDENTIFIERS,
 ];
 
 /// Blocks regenerated from document fields on export; not kept in
@@ -508,7 +509,7 @@ fn be_to_ne_plane(plane: &[u8], s: SampleType, n: usize) -> Vec<u8> {
     interleave(&[Some(plane)], &[zero_sample(s)], n, s, &[false])
 }
 
-fn unicode_names(data: &[u8]) -> Vec<String> {
+pub(crate) fn unicode_names(data: &[u8]) -> Vec<String> {
     let mut out = Vec::new();
     let mut at = 0;
     while at + 4 <= data.len() {
@@ -788,10 +789,23 @@ pub fn psd_to_document_with(file: &PsdFile, ctl: &photocraft_raster::Interrupt) 
         let first = cc + usize::from(file.merged_has_alpha());
         let plane = h.row_bytes() * hh;
         let names = file.resource(1045).map(|r| unicode_names(&r.data)).unwrap_or_default();
+        let extra_n = usize::from(h.channels).saturating_sub(first);
+        // Spot planes are ink-inverted in the file (0 = solid). Alpha planes are not.
+        let spots = if let Some(r) = file.resource(crate::channel_map::DISPLAY_INFO) {
+            crate::channel_map::spot_flags(&r.data, true, extra_n)
+        } else if let Some(r) = file.resource(crate::channel_map::DISPLAY_INFO_OLD) {
+            crate::channel_map::spot_flags(&r.data, false, extra_n)
+        } else {
+            vec![false; extra_n]
+        };
         for (k, idx) in (first..usize::from(h.channels)).enumerate() {
             let Some(p) = all.get(idx * plane..(idx + 1) * plane) else { break };
+            let mut raw = be_to_ne_plane(p, depth, n);
+            if spots.get(k).copied().unwrap_or(false) {
+                crate::pixels::invert_plane(&mut raw, depth, false);
+            }
             let mut s = Surface::new(cx.mask_fmt);
-            s.write_interleaved(canvas, &be_to_ne_plane(p, depth, n));
+            s.write_interleaved(canvas, &raw);
             s.prune();
             let name = names.get(k).cloned().unwrap_or_else(|| format!("Alpha {}", k + 1));
             doc.channels.push(AlphaChannel::new(name, s));

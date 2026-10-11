@@ -21,6 +21,33 @@ pub fn sample_for_depth(depth: u16) -> SampleType {
     }
 }
 
+/// Complements every sample in `bytes`. Photoshop stores a spot channel as ink density
+/// inverted: 0 is solid ink and the maximum sample is bare paper (the same convention as a
+/// CMYK plate and as Multichannel). An alpha channel is not stored this way: 0 is empty and
+/// the maximum sample is selected. `big_endian` is the PSD merged-image order; TIFF extra
+/// samples are native-endian.
+pub fn invert_plane(bytes: &mut [u8], s: SampleType, big_endian: bool) {
+    let bps = s.bytes();
+    if bps == 0 {
+        return;
+    }
+    for c in bytes.chunks_exact_mut(bps) {
+        match s {
+            SampleType::U8 => c[0] = 255 - c[0],
+            SampleType::U16 => {
+                let v = if big_endian { u16::from_be_bytes([c[0], c[1]]) } else { u16::from_ne_bytes([c[0], c[1]]) };
+                let w = 65535 - v;
+                c.copy_from_slice(&(if big_endian { w.to_be_bytes() } else { w.to_ne_bytes() }));
+            }
+            SampleType::F32 => {
+                let v = if big_endian { f32::from_be_bytes([c[0], c[1], c[2], c[3]]) } else { f32::from_ne_bytes([c[0], c[1], c[2], c[3]]) };
+                let w = 1.0 - v;
+                c.copy_from_slice(&(if big_endian { w.to_be_bytes() } else { w.to_ne_bytes() }));
+            }
+        }
+    }
+}
+
 fn invert_sample(bytes: &mut [u8], s: SampleType) {
     match s {
         SampleType::U8 => bytes[0] = 255 - bytes[0],

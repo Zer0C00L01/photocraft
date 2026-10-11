@@ -21,6 +21,13 @@ pub struct ActionsUi {
     pub selected: Option<usize>,
     pub selected_step: Option<usize>,
     pub expanded: Vec<bool>,
+    /// Folder row that is selected. `Some("")` is the Ungrouped Actions row.
+    /// A new action is recorded into this folder when it is not empty.
+    #[serde(default)]
+    pub selected_set: Option<String>,
+    /// Folder names the user has collapsed. Missing names are expanded.
+    #[serde(default)]
+    pub collapsed_sets: Vec<String>,
     #[serde(skip)]
     reveal_recording: Option<(usize, usize)>,
 }
@@ -43,8 +50,20 @@ pub fn selected_action(app: &PhotocraftApp) -> Option<&Action> {
 /// Index of the playback target. Photoshop's Play button uses the first action when
 /// the panel has actions but none of its rows is selected.
 fn playback_selection(app: &PhotocraftApp) -> Option<usize> {
-    let n = app.session.actions.list.len();
-    if n == 0 { None } else { Some(app.ui.actions.selected.filter(|i| *i < n).unwrap_or(0)) }
+    let list = &app.session.actions.list;
+    let n = list.len();
+    if n == 0 {
+        return None;
+    }
+    if let Some(i) = app.ui.actions.selected.filter(|i| *i < n) {
+        return Some(i);
+    }
+    if let Some(set) = app.ui.actions.selected_set.as_deref()
+        && let Some(i) = (0..n).find(|i| app.session.actions.folder(*i) == set)
+    {
+        return Some(i);
+    }
+    Some(0)
 }
 
 /// Steps in the `[[id, params], …]` shape batch and droplets already accept.
@@ -147,7 +166,14 @@ fn begin_recording(app: &mut PhotocraftApp, append: bool) {
     if app.session.actions.recording.is_some() {
         return;
     }
-    let params = if append { app.ui.actions.selected.map_or(json!({}), |i| json!({"action": i})) } else { json!({}) };
+    let params = if append {
+        app.ui.actions.selected.map_or(json!({}), |i| json!({"action": i}))
+    } else {
+        match app.ui.actions.selected_set.as_deref() {
+            Some(set) if !set.is_empty() => json!({"set": set}),
+            _ => json!({}),
+        }
+    };
     let Ok(v) = app.run("actions.record", params) else { return };
     let Some(i) = v.get("index").and_then(Value::as_u64).and_then(|n| usize::try_from(n).ok()) else { return };
     app.ui.actions.selected = Some(i);
@@ -177,6 +203,12 @@ fn visible_steps(app: &PhotocraftApp, action: usize) -> Vec<(String, Value)> {
 }
 
 fn step_label(id: &str, params: &Value) -> String {
+    if id == "image.dtf" {
+        let contract = params.get("contract").and_then(Value::as_f64).unwrap_or(f64::from(photocraft_engine::dtf_cmds::DEFAULT_CONTRACT));
+        let name = params.get("name").and_then(Value::as_str).unwrap_or(photocraft_engine::dtf_cmds::DEFAULT_NAME);
+        let contract = if contract.fract() == 0.0 && contract.abs() < 1.0e6 { format!("{}", contract as i64) } else { format!("{contract}") };
+        return format!("DTF Spot Channel ({contract} px, {name})");
+    }
     if id == "actions.play" {
         let target = params.get("action").map(|v| v.as_str().map(str::to_owned).unwrap_or_else(|| v.to_string())).unwrap_or_default();
         format!("{}: {target}", label_of(id))
@@ -231,6 +263,16 @@ fn move_row(app: &mut PhotocraftApp, source: DragRow, to: usize) {
 }
 
 fn delete_selection(app: &mut PhotocraftApp) {
+    if app.ui.actions.selected.is_none()
+        && let Some(set) = app.ui.actions.selected_set.clone()
+        && !set.is_empty()
+    {
+        if app.run("actions.deleteSet", json!({"name": set})).is_ok() {
+            app.ui.actions.selected_set = None;
+            app.ui.actions.collapsed_sets.retain(|name| name != &set);
+        }
+        return;
+    }
     let Some(action) = app.ui.actions.selected else { return };
     let step = app.ui.actions.selected_step;
     let mut params = json!({"action": action});
@@ -246,6 +288,118 @@ fn delete_selection(app: &mut PhotocraftApp) {
     app.ui.actions.selected_step = None;
     if step.is_none() && action < app.ui.actions.expanded.len() {
         app.ui.actions.expanded.remove(action);
+    }
+}
+
+/// Folders in panel order, then the action indices inside each one. Actions with an empty
+/// folder are "Ungrouped Actions". A named folder with no actions is still shown.
+fn grouped(state: &photocraft_engine::actions_cmds::ActionState) -> Vec<(String, Vec<usize>)> {
+    let mut seen = Vec::new();
+    let mut names = Vec::new();
+    let ungrouped: Vec<usize> = (0..state.list.len()).filter(|i| state.folder(*i).is_empty()).collect();
+    if !ungrouped.is_empty() {
+        names.push(actions_cmds::UNGROUPED.to_string());
+    }
+    for name in state.sets.iter().map(String::as_str).chain((0..state.list.len()).map(|i| state.folder(i))) {
+        if name.is_empty() || seen.iter().any(|have: &String| have == name) {
+            continue;
+        }
+        seen.push(name.to_string());
+        names.push(name.to_string());
+    }
+    names
+        .into_iter()
+        .map(|name| {
+            let idxs = if name == actions_cmds::UNGROUPED {
+                (0..state.list.len()).filter(|i| state.folder(*i).is_empty()).collect()
+            } else {
+                (0..state.list.len()).filter(|i| state.folder(*i) == name).collect()
+            };
+            (name, idxs)
+        })
+        .collect()
+}
+
+fn field_label(key: &str) -> String {
+    let mut out = String::new();
+    for (i, c) in key.chars().enumerate() {
+        if i == 0 {
+            out.extend(c.to_uppercase());
+        } else if c.is_uppercase() {
+            out.push(' ');
+            out.extend(c.to_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Number, text and checkbox fields for the selected step. Objects and arrays stay as recorded.
+fn step_editor(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+    let Some(ai) = app.ui.actions.selected else { return };
+    let Some(si) = app.ui.actions.selected_step else { return };
+    let Some((id, params)) = app.session.actions.list.get(ai).and_then(|action| action.steps.get(si)).cloned() else { return };
+    let Value::Object(map) = &params else { return };
+    let keys: Vec<String> = map
+        .iter()
+        .filter(|(key, value)| !key.starts_with("__") && matches!(value, Value::String(_) | Value::Number(_) | Value::Bool(_)))
+        .map(|(key, _)| key.clone())
+        .collect();
+    if keys.is_empty() {
+        return;
+    }
+    ui.separator();
+    ui.label(egui::RichText::new(format!("{} — {}", tl!("Step settings"), step_label(&id, &params))).size(11.0));
+    let mut updated = params.clone();
+    let mut changed = false;
+    for key in keys {
+        let Some(value) = map.get(&key).cloned() else { continue };
+        ui.horizontal(|ui| {
+            ui.label(field_label(&key));
+            match value {
+                Value::Bool(mut on) => {
+                    if ui.checkbox(&mut on, "").changed()
+                        && let Some(obj) = updated.as_object_mut()
+                    {
+                        obj.insert(key, json!(on));
+                        changed = true;
+                    }
+                }
+                Value::String(mut text) => {
+                    let edited = if key == "source" {
+                        let opts = [("layer".to_string(), "Layer"), ("composite".to_string(), "Visible layers")];
+                        crate::widgets::dropdown(ui, &format!("step-source-{ai}-{si}"), &mut text, &opts, 160.0)
+                    } else {
+                        ui.add(egui::TextEdit::singleline(&mut text).desired_width(160.0).id(egui::Id::new(("step-field", ai, si, key.clone())))).changed()
+                    };
+                    if edited && let Some(obj) = updated.as_object_mut() {
+                        obj.insert(key, json!(text));
+                        changed = true;
+                    }
+                }
+                Value::Number(n) => {
+                    if let Some(mut i) = n.as_i64() {
+                        if ui.add(egui::DragValue::new(&mut i)).changed()
+                            && let Some(obj) = updated.as_object_mut()
+                        {
+                            obj.insert(key, json!(i));
+                            changed = true;
+                        }
+                    } else if let Some(mut x) = n.as_f64()
+                        && ui.add(egui::DragValue::new(&mut x).speed(0.5)).changed()
+                        && let Some(obj) = updated.as_object_mut()
+                    {
+                        obj.insert(key, json!(x));
+                        changed = true;
+                    }
+                }
+                _ => {}
+            }
+        });
+    }
+    if changed {
+        let _ = app.run("actions.setStep", json!({"action": ai, "step": si, "params": updated}));
     }
 }
 
@@ -277,8 +431,9 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
             *expanded = true;
         }
     }
+    let groups = grouped(&app.session.actions);
     egui::ScrollArea::vertical().id_salt("actions-rows").max_height(max_h).auto_shrink([false, true]).show(ui, |ui| {
-        if rows.is_empty() {
+        if groups.is_empty() {
             ui.label(egui::RichText::new(tl!("Record ● a sequence of edits, then play ▶ it on any document.")).color(t.text_faint).size(11.5));
         }
         if egui::DragAndDrop::has_payload_of_type::<DragRow>(ui.ctx()) {
@@ -297,90 +452,156 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                 }
             }
         }
-        for (i, (name, steps)) in rows.iter().enumerate() {
+        for (set_name, idxs) in &groups {
             let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::click_and_drag());
-            if reveal == Some((i, 0)) {
-                ui.scroll_to_rect(rect, Some(egui::Align::BOTTOM));
-            }
-            let sel = app.ui.actions.selected == Some(i) && app.ui.actions.selected_step.is_none();
-            resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, sel, name));
-            if sel {
+            let collapsed = app.ui.actions.collapsed_sets.iter().any(|name| name == set_name);
+            let set_key = if set_name == actions_cmds::UNGROUPED { "" } else { set_name.as_str() };
+            let set_selected = app.ui.actions.selected.is_none() && app.ui.actions.selected_set.as_deref() == Some(set_key);
+            resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, set_selected, set_name));
+            if set_selected {
                 ui.painter().rect_filled(rect, 0.0, t.row_selected);
             } else if resp.hovered() {
                 ui.painter().rect_filled(rect, 0.0, t.hover.gamma_multiply(0.5));
             }
-            if let Some(change) = drag_row(ui, &resp, DragRow { action: i, step: None }, &t) {
-                moved = Some(change);
-            }
-            let expanded = app.ui.actions.expanded.get(i).copied().unwrap_or(false);
             let tri = Rect::from_center_size(pos2(rect.left() + 12.0, rect.center().y), vec2(8.0, 8.0));
-            let pts =
-                if expanded { vec![tri.left_top(), tri.right_top(), tri.center_bottom()] } else { vec![tri.left_top(), tri.right_center(), tri.left_bottom()] };
+            let pts = if collapsed {
+                vec![tri.left_top(), tri.right_center(), tri.left_bottom()]
+            } else {
+                vec![tri.left_top(), tri.right_top(), tri.center_bottom()]
+            };
             ui.painter().add(egui::Shape::convex_polygon(pts, t.text_dim, Stroke::NONE));
-            crate::icons::paint(ui, Rect::from_center_size(pos2(rect.left() + 30.0, rect.center().y), vec2(16.0, 16.0)), "play", 11.0, t.icon);
-            let recording_this = recording.is_some_and(|(_, r)| r == i);
-            let nsteps = steps.len();
-            ui.painter().text(pos2(rect.left() + 44.0, rect.center().y), Align2::LEFT_CENTER, name, egui::FontId::proportional(12.0), t.text);
-            ui.painter().text(
-                pos2(rect.right() - 8.0, rect.center().y),
-                Align2::RIGHT_CENTER,
-                app.session
-                    .prefs()
-                    .shortcuts
-                    .get(&shortcut_id(name))
-                    .filter(|s| !s.is_empty())
-                    .map_or_else(|| format!("{nsteps} steps"), |key| format!("{key} · {nsteps} steps")),
-                egui::FontId::proportional(11.0),
-                t.text_faint,
-            );
-            if recording_this {
-                ui.painter().circle_filled(pos2(rect.right() - 64.0, rect.center().y), 4.0, Color32::from_rgb(230, 60, 60));
-            }
+            crate::icons::paint(ui, Rect::from_center_size(pos2(rect.left() + 30.0, rect.center().y), vec2(16.0, 16.0)), "folder", 12.0, t.icon);
+            ui.painter().text(pos2(rect.left() + 44.0, rect.center().y), Align2::LEFT_CENTER, set_name, egui::FontId::proportional(12.0), t.text);
             if resp.clicked() {
-                app.ui.actions.selected = Some(i);
+                app.ui.actions.selected = None;
                 app.ui.actions.selected_step = None;
+                app.ui.actions.selected_set = Some(if set_name == actions_cmds::UNGROUPED { String::new() } else { set_name.clone() });
                 if resp.interact_pointer_pos().is_some_and(|p| p.x < rect.left() + 20.0) {
-                    if app.ui.actions.expanded.len() <= i {
-                        app.ui.actions.expanded.resize(i + 1, false);
+                    if collapsed {
+                        app.ui.actions.collapsed_sets.retain(|name| name != set_name);
+                    } else {
+                        app.ui.actions.collapsed_sets.push(set_name.clone());
                     }
-                    app.ui.actions.expanded[i] = !expanded;
                 }
             }
-            resp.context_menu(|ui| {
-                ui.label(tl!("Keyboard Shortcuts"));
-                let current = app.session.prefs().shortcuts.get(&shortcut_id(name)).cloned().unwrap_or_default();
-                for key in std::iter::once(String::new()).chain((1..=12).map(|n| format!("F{n}"))) {
-                    let label = if key.is_empty() { tl!("None").to_string() } else { key.clone() };
-                    if ui.selectable_label(current == key, label).clicked() {
-                        let _ = assign_shortcut(app, name, &key);
+            if set_name != actions_cmds::UNGROUPED {
+                resp.context_menu(|ui| {
+                    if ui.button(tl!("Delete Set")).clicked() {
+                        let _ = app.run("actions.deleteSet", json!({"name": set_name}));
+                        if app.ui.actions.selected_set.as_deref() == Some(set_name.as_str()) {
+                            app.ui.actions.selected_set = None;
+                        }
+                        app.ui.actions.collapsed_sets.retain(|name| name != set_name);
                         ui.close();
                     }
-                }
-            });
-            if resp.double_clicked() {
-                play_idx = Some(i);
+                });
             }
-            if expanded {
-                for (step, (id, params)) in steps.iter().enumerate() {
-                    let (r, response) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), Sense::click_and_drag());
-                    if reveal == Some((i, step + 1)) {
-                        ui.scroll_to_rect(r, Some(egui::Align::BOTTOM));
+            if collapsed {
+                continue;
+            }
+            for &i in idxs {
+                let (name, steps) = &rows[i];
+                let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::click_and_drag());
+                if reveal == Some((i, 0)) {
+                    ui.scroll_to_rect(rect, Some(egui::Align::BOTTOM));
+                }
+                let sel = app.ui.actions.selected == Some(i) && app.ui.actions.selected_step.is_none();
+                resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, sel, name));
+                if sel {
+                    ui.painter().rect_filled(rect, 0.0, t.row_selected);
+                } else if resp.hovered() {
+                    ui.painter().rect_filled(rect, 0.0, t.hover.gamma_multiply(0.5));
+                }
+                if let Some(change) = drag_row(ui, &resp, DragRow { action: i, step: None }, &t) {
+                    moved = Some(change);
+                }
+                let expanded = app.ui.actions.expanded.get(i).copied().unwrap_or(false);
+                let tri = Rect::from_center_size(pos2(rect.left() + 12.0, rect.center().y), vec2(8.0, 8.0));
+                let pts = if expanded {
+                    vec![tri.left_top(), tri.right_top(), tri.center_bottom()]
+                } else {
+                    vec![tri.left_top(), tri.right_center(), tri.left_bottom()]
+                };
+                ui.painter().add(egui::Shape::convex_polygon(pts, t.text_dim, Stroke::NONE));
+                crate::icons::paint(ui, Rect::from_center_size(pos2(rect.left() + 30.0, rect.center().y), vec2(16.0, 16.0)), "play", 11.0, t.icon);
+                let recording_this = recording.is_some_and(|(_, r)| r == i);
+                let nsteps = steps.len();
+                ui.painter().text(pos2(rect.left() + 44.0, rect.center().y), Align2::LEFT_CENTER, name, egui::FontId::proportional(12.0), t.text);
+                ui.painter().text(
+                    pos2(rect.right() - 8.0, rect.center().y),
+                    Align2::RIGHT_CENTER,
+                    app.session
+                        .prefs()
+                        .shortcuts
+                        .get(&shortcut_id(name))
+                        .filter(|s| !s.is_empty())
+                        .map_or_else(|| format!("{nsteps} steps"), |key| format!("{key} · {nsteps} steps")),
+                    egui::FontId::proportional(11.0),
+                    t.text_faint,
+                );
+                if recording_this {
+                    ui.painter().circle_filled(pos2(rect.right() - 64.0, rect.center().y), 4.0, Color32::from_rgb(230, 60, 60));
+                }
+                if resp.clicked() {
+                    app.ui.actions.selected = Some(i);
+                    app.ui.actions.selected_step = None;
+                    app.ui.actions.selected_set = Some(app.session.actions.folder(i).to_string());
+                    if resp.interact_pointer_pos().is_some_and(|p| p.x < rect.left() + 20.0) {
+                        if app.ui.actions.expanded.len() <= i {
+                            app.ui.actions.expanded.resize(i + 1, false);
+                        }
+                        app.ui.actions.expanded[i] = !expanded;
                     }
-                    let label = step_label(id, params);
-                    let selected = app.ui.actions.selected == Some(i) && app.ui.actions.selected_step == Some(step);
-                    response.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, selected, &label));
-                    if selected {
-                        ui.painter().rect_filled(r, 0.0, t.row_selected);
-                    } else if response.hovered() {
-                        ui.painter().rect_filled(r, 0.0, t.hover.gamma_multiply(0.5));
+                }
+                resp.context_menu(|ui| {
+                    ui.label(tl!("Keyboard Shortcuts"));
+                    let current = app.session.prefs().shortcuts.get(&shortcut_id(name)).cloned().unwrap_or_default();
+                    for key in std::iter::once(String::new()).chain((1..=12).map(|n| format!("F{n}"))) {
+                        let label = if key.is_empty() { tl!("None").to_string() } else { key.clone() };
+                        if ui.selectable_label(current == key, label).clicked() {
+                            let _ = assign_shortcut(app, name, &key);
+                            ui.close();
+                        }
                     }
-                    if let Some(change) = drag_row(ui, &response, DragRow { action: i, step: Some(step) }, &t) {
-                        moved = Some(change);
+                    ui.separator();
+                    ui.label(tl!("Folder"));
+                    let here = app.session.actions.folder(i).to_string();
+                    if ui.selectable_label(here.is_empty(), tl!("Ungrouped Actions")).clicked() {
+                        let _ = app.run("actions.setFolder", json!({"action": i, "set": ""}));
+                        ui.close();
                     }
-                    ui.painter().text(pos2(r.left() + 44.0, r.center().y), Align2::LEFT_CENTER, label, egui::FontId::proportional(11.5), t.text_dim);
-                    if response.clicked() {
-                        app.ui.actions.selected = Some(i);
-                        app.ui.actions.selected_step = Some(step);
+                    for set in app.session.actions.sets.clone() {
+                        if ui.selectable_label(here == set, set.clone()).clicked() {
+                            let _ = app.run("actions.setFolder", json!({"action": i, "set": set}));
+                            ui.close();
+                        }
+                    }
+                });
+                if resp.double_clicked() {
+                    play_idx = Some(i);
+                }
+                if expanded {
+                    for (step, (id, params)) in steps.iter().enumerate() {
+                        let (r, response) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), Sense::click_and_drag());
+                        if reveal == Some((i, step + 1)) {
+                            ui.scroll_to_rect(r, Some(egui::Align::BOTTOM));
+                        }
+                        let label = step_label(id, params);
+                        let selected = app.ui.actions.selected == Some(i) && app.ui.actions.selected_step == Some(step);
+                        response.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, selected, &label));
+                        if selected {
+                            ui.painter().rect_filled(r, 0.0, t.row_selected);
+                        } else if response.hovered() {
+                            ui.painter().rect_filled(r, 0.0, t.hover.gamma_multiply(0.5));
+                        }
+                        if let Some(change) = drag_row(ui, &response, DragRow { action: i, step: Some(step) }, &t) {
+                            moved = Some(change);
+                        }
+                        ui.painter().text(pos2(r.left() + 44.0, r.center().y), Align2::LEFT_CENTER, label, egui::FontId::proportional(11.5), t.text_dim);
+                        if response.clicked() {
+                            app.ui.actions.selected = Some(i);
+                            app.ui.actions.selected_step = Some(step);
+                        }
                     }
                 }
             }
@@ -389,6 +610,7 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     if let Some((source, to)) = moved {
         move_row(app, source, to);
     }
+    step_editor(app, ui);
     ui.add_space(4.0);
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 2.0;
@@ -412,7 +634,19 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         if crate::icons::button(ui, "plus", 24.0, false, tl!("Create new action")).clicked() && !recording_now {
             begin_recording(app, false);
         }
-        let can_delete = app.ui.actions.selected.is_some() && (!recording_now || app.ui.actions.selected_step.is_some());
+        if crate::icons::button(ui, "folder-plus", 24.0, false, tl!("Create new set")).clicked()
+            && !recording_now
+            && let Ok(v) = app.run("actions.newSet", json!({}))
+            && let Some(name) = v.get("set").and_then(Value::as_str)
+        {
+            app.ui.actions.selected = None;
+            app.ui.actions.selected_step = None;
+            app.ui.actions.selected_set = Some(name.to_string());
+            app.ui.actions.collapsed_sets.retain(|set| set != name);
+        }
+        let set_selected = app.ui.actions.selected.is_none() && app.ui.actions.selected_set.as_deref().is_some_and(|set| !set.is_empty());
+        let can_delete =
+            if set_selected { !recording_now } else { app.ui.actions.selected.is_some() && (!recording_now || app.ui.actions.selected_step.is_some()) };
         ui.add_enabled_ui(can_delete, |ui| {
             let response = crate::icons::button(ui, "trash", 24.0, false, tl!("Delete"));
             response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, can_delete, tl!("Delete")));
@@ -679,5 +913,39 @@ mod tests {
         let d = &app.session.active().unwrap().doc;
         assert_eq!(d.layers.len(), 2);
         assert_eq!(d.layers[1].surface().unwrap().pixel(5, 5), vec![1.0, 0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn folders_group_actions_and_the_selected_step_can_be_edited() {
+        use egui_kittest::{Harness, kittest::Queryable};
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        app.session.actions.sets.push("DTF".into());
+        app.session
+            .actions
+            .list
+            .push(Action { name: "Spot".into(), steps: vec![("image.dtf".into(), json!({"contract": 1, "name": "Spot Color 1", "solidity": 60}))] });
+        app.session.actions.folders.push("DTF".into());
+        app.session.actions.list.push(Action { name: "Mine".into(), steps: vec![] });
+        app.ui.actions.expanded = vec![true, false];
+        let mut h = Harness::builder().with_size(vec2(420.0, 420.0)).build_ui_state(|ui, app| panel(app, ui), app);
+        h.run_steps(3);
+        h.get_by_label("DTF");
+        h.get_by_label("Ungrouped Actions");
+        h.get_by_label("Mine");
+        h.get_by_label("DTF Spot Channel (1 px, Spot Color 1)").click();
+        h.run_steps(2);
+        h.get_by_label("Contract");
+        h.get_by_label("Name");
+        assert_eq!(h.state().ui.actions.selected, Some(0));
+        assert_eq!(h.state().ui.actions.selected_step, Some(0));
+        h.get_by_label("DTF").click();
+        h.run_steps(2);
+        assert_eq!(h.state().ui.actions.selected, None);
+        assert_eq!(h.state().ui.actions.selected_set.as_deref(), Some("DTF"));
+        h.get_by_label("Delete").click();
+        h.run_steps(2);
+        assert!(h.state().session.actions.sets.iter().all(|name| name != "DTF"));
+        assert!(h.state().session.actions.folder(0).is_empty(), "deleting the folder ungroups its action");
+        assert_eq!(h.state().session.actions.list[0].name, "Spot");
     }
 }

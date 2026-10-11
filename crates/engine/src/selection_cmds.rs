@@ -386,27 +386,7 @@ fn modify(s: &mut Session, p: &Value, op: &str) -> Result<Value> {
     let at_bounds = op == "border" || b(p, "applyAtCanvasBounds", false);
     let (area, m) = current_mask(&s.active().ok_or(EngineError::NoDocument)?.doc);
     let (w, h) = (area.width() as usize, area.height() as usize);
-    // Feather reaches 3σ = 3 r (σ = r, as in Photoshop); the others reach r. A margin past that
-    // keeps the canvas edge out of reach. A selection clear of the canvas edge needs none: both
-    // readings agree there.
-    let reach = if op == "feather" { r * 3.0 } else { r };
-    let pad = if touches_edge(&m, w, h) { reach.ceil() as usize + 2 } else { 0 };
-    let grown = |n: usize| pad.checked_mul(2).and_then(|p| n.checked_add(p));
-    let (Some(pw), Some(ph)) = (grown(w), grown(h)) else {
-        return Err(EngineError::BadParams { cmd: format!("select.modify.{op}"), msg: "the selection is too large to modify".into() });
-    };
-    if pw.checked_mul(ph).is_none_or(|n| n > MAX_MODIFY_PIXELS) {
-        return Err(EngineError::BadParams { cmd: format!("select.modify.{op}"), msg: "the selection is too large to modify".into() });
-    }
-    let padded = pad_mask(&m, w, h, pad, at_bounds);
-    let out = match op {
-        "expand" => sel::expand(&padded, pw, ph, r),
-        "contract" => sel::contract(&padded, pw, ph, r),
-        "border" => sel::border(&padded, pw, ph, r),
-        "smooth" => sel::smooth(&padded, pw, ph, r),
-        _ => sel::feather(&padded, pw, ph, r),
-    };
-    let out = crop_mask(&out, pw, pad, w, h);
+    let out = modify_mask(&m, w, h, op, r, at_bounds).map_err(|msg| EngineError::BadParams { cmd: format!("select.modify.{op}"), msg })?;
     let label = match op {
         "expand" => "Expand Selection",
         "contract" => "Contract Selection",
@@ -415,6 +395,35 @@ fn modify(s: &mut Session, p: &Value, op: &str) -> Result<Value> {
         _ => "Feather Selection",
     };
     set_selection(s, label, area, out, SelectionMode::Replace)
+}
+
+/// Select › Modify on a mask of `w`×`h`. `at_bounds` is Photoshop's "Apply effect at canvas
+/// bounds" (the canvas edge is a selection edge). Shared with Image › DTF Spot Channel.
+pub(crate) fn modify_mask(m: &[f32], w: usize, h: usize, op: &str, r: f32, at_bounds: bool) -> std::result::Result<Vec<f32>, String> {
+    if !r.is_finite() || r < 0.0 {
+        return Err(format!("radius {r} is not a usable number"));
+    }
+    // Feather reaches 3σ = 3 r (σ = r, as in Photoshop); the others reach r. A margin past that
+    // keeps the canvas edge out of reach. A selection clear of the canvas edge needs none: both
+    // readings agree there.
+    let reach = if op == "feather" { r * 3.0 } else { r };
+    let pad = if touches_edge(m, w, h) { reach.ceil() as usize + 2 } else { 0 };
+    let grown = |n: usize| pad.checked_mul(2).and_then(|p| n.checked_add(p));
+    let (Some(pw), Some(ph)) = (grown(w), grown(h)) else {
+        return Err("the selection is too large to modify".into());
+    };
+    if pw.checked_mul(ph).is_none_or(|n| n > MAX_MODIFY_PIXELS) {
+        return Err("the selection is too large to modify".into());
+    }
+    let padded = pad_mask(m, w, h, pad, at_bounds);
+    let out = match op {
+        "expand" => sel::expand(&padded, pw, ph, r),
+        "contract" => sel::contract(&padded, pw, ph, r),
+        "border" => sel::border(&padded, pw, ph, r),
+        "smooth" => sel::smooth(&padded, pw, ph, r),
+        _ => sel::feather(&padded, pw, ph, r),
+    };
+    Ok(crop_mask(&out, pw, pad, w, h))
 }
 
 /// The largest padded mask Modify works on (a 300000 × 300000 canvas is 9e10 pixels; this caps a

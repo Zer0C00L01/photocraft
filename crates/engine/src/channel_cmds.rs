@@ -129,7 +129,7 @@ pub(crate) fn fix_view(st: &mut DocState) {
 }
 
 /// Bump the revision for a view-only change without dirtying a clean document.
-fn touch(st: &mut DocState) {
+pub(crate) fn touch(st: &mut DocState) {
     let clean = st.saved_revision == st.revision;
     st.revision += 1;
     if clean {
@@ -190,7 +190,7 @@ fn read_plane(s: &Surface, r: Rect) -> Vec<f32> {
     if ch > 1 { v.chunks_exact(ch).map(|p| p[0]).collect() } else { v }
 }
 
-fn plane_surface(vals: &[f32], r: Rect, fmt: PixelFormat) -> Surface {
+pub(crate) fn plane_surface(vals: &[f32], r: Rect, fmt: PixelFormat) -> Surface {
     let mut s = Surface::new(fmt);
     let clamped: Vec<f32> = vals.iter().map(|v| v.clamp(0.0, 1.0)).collect();
     s.write_region(r, &clamped);
