@@ -265,7 +265,7 @@ fn params_for_preset(s: &Session) -> Value {
 
 /// The one-step action, with the screenshot's values, filed in the DTF folder.
 pub fn builtin_action() -> Action {
-    Action { name: ACTION_NAME.into(), steps: vec![(CMD.into(), default_params())] }
+    Action::new(ACTION_NAME.into(), vec![(CMD.into(), default_params())])
 }
 
 /// The previous preset was the three Photoshop commands. Fold those into one `image.dtf` step,
@@ -313,7 +313,7 @@ pub fn ensure_preset(s: &mut Session) {
         return;
     }
     let params = params_for_preset(s);
-    let action = Action { name: ACTION_NAME.into(), steps: vec![(CMD.into(), params)] };
+    let action = Action::new(ACTION_NAME.into(), vec![(CMD.into(), params)]);
     let _ = crate::actions_cmds::push_action(s, action, SET_NAME);
 }
 
@@ -570,14 +570,14 @@ mod tests {
     #[test]
     fn a_saved_three_step_preset_becomes_one_dtf_step_in_the_folder() {
         let mut s = Session::new();
-        s.actions.list.push(Action {
-            name: ACTION_NAME.into(),
-            steps: vec![
+        s.actions.list.push(Action::new(
+            ACTION_NAME.into(),
+            vec![
                 ("select.loadSelection".into(), json!({"channel": "transparency"})),
                 ("select.modify.contract".into(), json!({"radius": 2, "applyAtCanvasBounds": true})),
                 ("channel.newSpot".into(), json!({"name": "White", "color": "#ffffff", "solidity": 80, "fromSelection": true})),
             ],
-        });
+        ));
         ensure_preset(&mut s);
         assert_eq!(s.actions.list.len(), 1);
         assert_eq!(s.actions.folder(0), SET_NAME);

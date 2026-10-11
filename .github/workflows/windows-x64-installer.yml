@@ -12,7 +12,7 @@ name: Windows x64 installer
 on:
   push:
     branches:
-      - cursor/dtf-spot-channel-action-3c53
+      - cursor/photoshop-actions-panel-3c53
   workflow_dispatch:
 
 permissions:
@@ -109,10 +109,12 @@ jobs:
         run: |
           set -eu
           tag=dtf-windows-x64
-          title="PhotoCraft Windows x64 (unsigned DTF build)"
+          title="PhotoCraft Windows x64 (unsigned DTF + Actions build)"
           test -n "$(find dist -name '*.msi' -print -quit)"
           cat > notes.md <<'EOF'
-          This is an unsigned build of the DTF branch for Windows 10/11 64-bit. It is not an official PhotoCraft release. Windows shows a security warning because the installer is not signed.
+          This is an unsigned build for Windows 10/11 64-bit. It is not an official PhotoCraft release. Windows shows a security warning because the installer is not signed.
+
+          This build includes the DTF spot-channel action and a Photoshop-style Actions panel (sets, steps, Button Mode, and .atn import).
 
           ## Install over C:\Program Files\PhotoCraft
 

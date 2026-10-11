@@ -327,10 +327,7 @@ async fn agent_play_refuses_a_recorded_file_open() {
     let dir = tmp("actions-auth");
     let workspace = AuthorizedWorkspace::new(Some(&dir), Some(&dir)).expect("test workspace");
     let mut headless = photocraft_automation::Headless::with_workspace(workspace);
-    headless.session.actions.list.push(photocraft_engine::actions_cmds::Action {
-        name: "Open".into(),
-        steps: vec![("file.open".into(), json!({"path": "/etc/passwd"})), ("layer.new.layer".into(), json!({}))],
-    });
+    headless.session.actions.list.push(photocraft_engine::actions_cmds::Action::new("Open".into(), vec![("file.open".into(), json!({"path": "/etc/passwd"})), ("layer.new.layer".into(), json!({}))]));
     let (c, server) = connect_headless(headless).await;
     let played = run(&c, "actions.play", json!({"action": "Open"})).await;
     assert_eq!(played["ran"], 0, "{played}");
