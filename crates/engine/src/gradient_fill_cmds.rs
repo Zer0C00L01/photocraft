@@ -17,7 +17,7 @@ use photocraft_doc::{Document, Fill, GradientStyle, Layer, LayerContent, LayerId
 use photocraft_geom::Rect;
 use serde_json::{Value, json};
 
-use crate::commands::{CommandSpec, blend_from_str, layer_param};
+use crate::commands::{CommandSpec, blend_from_str, check_pixels_unlocked, layer_param};
 use crate::presets::gradients::{GradientPreset, transparency_param};
 use crate::{EngineError, Result, Session};
 
@@ -341,6 +341,10 @@ fn set(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 fn replace_fill(s: &mut Session, id: LayerId, label: &str, new: Fill) -> Result<()> {
+    {
+        let doc = &s.active().ok_or(EngineError::NoDocument)?.doc;
+        check_pixels_unlocked(doc, id)?;
+    }
     s.edit(label, |doc, _| {
         let mode = doc.mode;
         let l = doc.layer_mut(id).ok_or(EngineError::NoLayer(id))?;

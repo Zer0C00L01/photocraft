@@ -115,6 +115,7 @@ fn opt_blob(b: &Option<Arc<Vec<u8>>>, sink: &mut dyn Sink) -> Option<Hash> {
 fn video_m(v: &photocraft_doc::VideoData, sink: &mut dyn Sink) -> crate::manifest::VideoDataM {
     crate::manifest::VideoDataM {
         frames: v.frames.iter().map(|f| surface_m(f, sink)).collect(),
+        original_frames: v.original_frames.as_ref().map(|frames| frames.iter().map(|f| surface_m(f, sink)).collect()),
         source: v.source.clone(),
         fps: v.fps,
         show_altered: v.show_altered,
@@ -242,6 +243,7 @@ pub(crate) fn doc_m(d: &Document, sink: &mut dyn Sink) -> DocM {
         work_path: d.work_path.clone(),
         clipping_path: d.clipping_path.clone(),
         quick_mask: d.quick_mask.as_ref().map(|c| channel_m(c, sink)),
+        quick_mask_unselected: d.quick_mask_unselected,
         patterns: d
             .patterns
             .iter()
@@ -309,7 +311,11 @@ pub(crate) struct Loader<'a> {
 impl Loader<'_> {
     fn video(&mut self, m: &crate::manifest::VideoDataM) -> Result<photocraft_doc::VideoData> {
         let frames = m.frames.iter().map(|f| self.surface(f)).collect::<Result<Vec<_>>>()?;
-        Ok(photocraft_doc::VideoData { frames, source: m.source.clone(), fps: m.fps, show_altered: m.show_altered })
+        if m.original_frames.as_ref().is_some_and(|o| o.len() != frames.len()) {
+            return Err(FormatError::corrupt("video original frame count differs from edited frame count"));
+        }
+        let original_frames = m.original_frames.as_ref().map(|source| source.iter().map(|f| self.surface(f)).collect::<Result<Vec<_>>>()).transpose()?;
+        Ok(photocraft_doc::VideoData { frames, original_frames, source: m.source.clone(), fps: m.fps, show_altered: m.show_altered })
     }
 
     fn surface(&mut self, m: &SurfaceM) -> Result<Surface> {
@@ -602,6 +608,7 @@ impl Loader<'_> {
             work_path: m.work_path.clone(),
             clipping_path: m.clipping_path.clone(),
             quick_mask,
+            quick_mask_unselected: m.quick_mask_unselected,
             patterns,
             color_table: m.color_table.clone(),
             duotone: m.duotone.clone(),

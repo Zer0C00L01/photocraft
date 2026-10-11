@@ -40,6 +40,30 @@ pub struct OpenTab {
     pub path: Option<String>,
     /// The tab position it goes to when it opens (a file dropped on the tabs); `None`: the end.
     pub slot: Option<usize>,
+    /// Its place in a set of files opened together, when it is one of several (see [`OpenOrder`]).
+    pub order: Option<OpenOrder>,
+}
+
+/// A file's place in a set opened together (File › Open with several files, paths on the command
+/// line, the OS's "open these documents"): the set's tabs end up in its order whatever order the
+/// background opens finish in (#3248), small files first otherwise.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OpenOrder {
+    /// The set, from [`begin_batch`].
+    pub batch: u64,
+    /// The file's position in the set.
+    pub seq: usize,
+}
+
+/// A set of files opened together: where its tabs start and which members have opened.
+#[derive(Clone, Debug)]
+pub(crate) struct OpenBatch {
+    id: u64,
+    /// The tab position of the set's first document: after the documents and opens there when it
+    /// started.
+    base: usize,
+    /// The `seq` of every member whose document is in place.
+    opened: Vec<usize>,
 }
 
 /// The job command of a background save.
@@ -117,6 +141,8 @@ pub struct SaveJob {
     pub path: String,
     /// A copy leaves the document's path and unsaved state alone.
     pub copy: bool,
+    /// An automation save records without firing user-configured hooks.
+    pub automation: bool,
     pub state: Arc<SaveState>,
     /// The job has ended (cancelled, say) but its worker may still be running: kept until it
     /// returns, so quitting and another save to the same file wait for it.
@@ -130,6 +156,10 @@ pub struct JobsUi {
     pub(crate) waiters: Vec<(JobId, Sender<ControlResponse>)>,
     /// Background opens, in tab order.
     pub opens: Vec<OpenTab>,
+    /// Sets of files opened together that still have members opening (see [`OpenOrder`]).
+    pub(crate) batches: Vec<OpenBatch>,
+    /// The id of the next set.
+    next_batch: u64,
     /// Background saves.
     pub saves: Vec<SaveJob>,
     /// The window was asked to close while a save was writing: close it once none is left.
@@ -167,7 +197,7 @@ pub fn start_open(app: &mut PhotocraftApp, name: &str, path: Option<String>, sou
         // Inline (wasm): finish now, like a background open that ended at once.
         Started::Done(v) => finish_open(app, name, path.as_deref(), &v, None),
         Started::Job(job) => {
-            app.jobs.opens.push(OpenTab { job, name: name.to_string(), path, slot: None });
+            app.jobs.opens.push(OpenTab { job, name: name.to_string(), path, slot: None, order: None });
             app.jobs.focus = Some(job);
             app.ui.chrome.home = None;
             app.ui.status = crate::i18n::fmt(tl!("Opening {name}…"), &[("name", name)]);
@@ -175,6 +205,48 @@ pub fn start_open(app: &mut PhotocraftApp, name: &str, path: Option<String>, sou
             Ok(())
         }
     }
+}
+
+/// Start a set of files opened together: the `batch` of their [`OpenOrder`]s. Its tabs follow the
+/// documents and opens already there. Call [`end_batch`] once every member has been started.
+pub(crate) fn begin_batch(app: &mut PhotocraftApp) -> u64 {
+    let id = app.jobs.next_batch;
+    app.jobs.next_batch = app.jobs.next_batch.wrapping_add(1);
+    let base = app.session.documents().len() + app.jobs.opens.len();
+    app.jobs.batches.push(OpenBatch { id, base, opened: Vec::new() });
+    id
+}
+
+/// A member of a set opened at once (not in the background): its document is in place at the
+/// end, so later members go after it.
+pub(crate) fn opened_in_order(jobs: &mut JobsUi, order: OpenOrder) {
+    if let Some(batch) = jobs.batches.iter_mut().find(|b| b.id == order.batch) {
+        batch.opened.push(order.seq);
+    }
+}
+
+/// Every member of the set has been started: forget it unless some are still opening.
+pub(crate) fn end_batch(jobs: &mut JobsUi) {
+    let opens = &jobs.opens;
+    jobs.batches.retain(|b| opens.iter().any(|o| o.order.is_some_and(|x| x.batch == b.id)));
+}
+
+/// The tab position for a member of a set that just opened: after the members before it that
+/// have opened, so the set reads in order whichever order the opens finish in.
+fn batch_slot(jobs: &mut JobsUi, order: OpenOrder) -> Option<usize> {
+    let batch = jobs.batches.iter_mut().find(|b| b.id == order.batch)?;
+    let slot = batch.base + batch.opened.iter().filter(|s| **s < order.seq).count();
+    batch.opened.push(order.seq);
+    Some(slot)
+}
+
+/// A background open's result (`{document, warnings, color}`) for `tab`, already taken out of
+/// [`JobsUi::opens`]: the document goes to the tab's slot, or to its place in its set.
+pub(crate) fn finish_open_tab(app: &mut PhotocraftApp, tab: &OpenTab, v: &Value) -> Result<(), String> {
+    let slot = tab.slot.or_else(|| tab.order.and_then(|o| batch_slot(&mut app.jobs, o)));
+    let r = finish_open(app, &tab.name, tab.path.as_deref(), v, slot);
+    end_batch(&mut app.jobs);
+    r
 }
 
 /// Save the active document to `path` in the background: `save` encodes and writes it on a
@@ -187,6 +259,7 @@ pub fn start_save(
     settings: ExportSettings,
     copy: bool,
     save: SaveFileFn,
+    automation: bool,
 ) -> Result<Option<(String, Vec<String>)>, String> {
     let st = app.session.active().ok_or("no document")?;
     if let Some(j) = app.session.job_on(st.doc.id) {
@@ -201,6 +274,7 @@ pub fn start_save(
     let (snapshot, doc, revision) = (Arc::clone(&st.doc), st.doc.id, st.revision);
     let label = crate::i18n::fmt(tl!("Saving {name}"), &[("name", &name)]);
     let target = path.clone();
+    let result_path = path.clone();
     let state = Arc::new(SaveState::default());
     let worker = Arc::clone(&state);
     let started = app.session.start_job(
@@ -214,16 +288,20 @@ pub fn start_save(
             save(&snapshot, &target, &settings, &ctl)
                 .map_err(|e| if ctl.check().is_err() { photocraft_engine::EngineError::Cancelled } else { photocraft_engine::EngineError::Other(e) })
         },
-        |_, warnings: Vec<String>| Ok(json!({"warnings": warnings})),
+        move |_, warnings: Vec<String>| Ok(json!({"path": result_path, "warnings": warnings})),
     );
     match started.map_err(|e| e.to_string())? {
         Started::Done(v) => {
             let warnings = warnings_of(&v);
-            app.saved(doc, revision, &path, &warnings, copy);
+            if automation {
+                app.saved_automation(doc, revision, &path, &warnings, copy);
+            } else {
+                app.saved(doc, revision, &path, &warnings, copy);
+            }
             Ok(Some((path, warnings)))
         }
         Started::Job(job) => {
-            app.jobs.saves.push(SaveJob { job, doc, revision, path, copy, state, ended: false });
+            app.jobs.saves.push(SaveJob { job, doc, revision, path, copy, automation, state, ended: false });
             // Control and MCP requests wait on it, as for other jobs.
             app.jobs.last_started = Some(job);
             // The status bar's progress readout names the save; clear any old message.
@@ -243,7 +321,11 @@ fn warnings_of(v: &Value) -> Vec<String> {
 fn finish_save(app: &mut PhotocraftApp, ctx: &egui::Context, save: SaveJob, label: &str, outcome: JobOutcome) {
     match outcome {
         JobOutcome::Done(v) => {
-            app.saved(save.doc, save.revision, &save.path, &warnings_of(&v), save.copy);
+            if save.automation {
+                app.saved_automation(save.doc, save.revision, &save.path, &warnings_of(&v), save.copy);
+            } else {
+                app.saved(save.doc, save.revision, &save.path, &warnings_of(&v), save.copy);
+            }
             if !save.copy {
                 crate::discard_ui::saved_document(app, ctx, save.doc);
             }
@@ -330,6 +412,14 @@ pub fn cancel(app: &mut PhotocraftApp, id: JobId) {
 }
 
 fn on_event(app: &mut PhotocraftApp, ctx: &egui::Context, e: JobEvent) {
+    // Preferences ▸ General ▸ Beep When Done (off by default): a finished operation beeps, like
+    // Photoshop's cue. Cancelling is the user's own action and stays silent.
+    if matches!(e.outcome, JobOutcome::Done(_))
+        && app.session.prefs().general.beep_when_done
+        && let Some(beep) = app.services.beep
+    {
+        beep();
+    }
     // Control requests waiting on this job.
     let reply = match &e.outcome {
         JobOutcome::Done(v) => json!({"ok": true, "result": v}),
@@ -369,7 +459,7 @@ fn on_event(app: &mut PhotocraftApp, ctx: &egui::Context, e: JobEvent) {
         let tab = app.jobs.opens.remove(i);
         match e.outcome {
             JobOutcome::Done(v) => {
-                if let Err(err) = finish_open(app, &tab.name, tab.path.as_deref(), &v, tab.slot) {
+                if let Err(err) = finish_open_tab(app, &tab, &v) {
                     app.open_failed(&tab.name, &err);
                 }
             }
@@ -379,6 +469,7 @@ fn on_event(app: &mut PhotocraftApp, ctx: &egui::Context, e: JobEvent) {
                 app.ui.status_error = false;
             }
         }
+        end_batch(&mut app.jobs);
         return;
     }
     match e.outcome {

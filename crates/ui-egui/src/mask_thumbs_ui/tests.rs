@@ -333,7 +333,7 @@ fn mask_view(h: &Harness<'_, PhotocraftApp>) -> serde_json::Value {
 
 fn canvas_px(h: &Harness<'_, PhotocraftApp>) -> Option<Vec<egui::Color32>> {
     let st = h.state().session.active().unwrap();
-    crate::channel_view::render(&st.doc, &st.channel_view, photocraft_geom::Rect::new(0, 0, 200, 100), 1, false)
+    crate::channel_view::render(&st.doc, &st.channel_view, photocraft_geom::Rect::new(0, 0, 200, 100), 1, false, st.active_layer)
 }
 
 fn near(a: Rect, b: Rect) -> bool {
@@ -440,12 +440,7 @@ fn clicking_the_vector_mask_targets_it_for_the_path_tools() {
     let k = layer(&h, masked).vector_mask.unwrap().path.subpaths[0].knots[0].anchor;
     assert_eq!((k.x, k.y), (25.0, 12.0));
     // The Pen adds a subpath to it.
-    h.state_mut().ui.pen = Some(crate::vector_ui::PenPath {
-        knots: vec![[[150.0, 10.0]; 3], [[190.0, 10.0]; 3], [[190.0, 40.0]; 3]],
-        unlinked: Vec::new(),
-        dragging: false,
-        adjusting_last: false,
-    });
+    h.state_mut().ui.pen = Some(crate::vector_ui::PenPath { knots: vec![[[150.0, 10.0]; 3], [[190.0, 10.0]; 3], [[190.0, 40.0]; 3]], ..Default::default() });
     crate::vector_ui::pen_commit(h.state_mut(), true);
     assert_eq!(layer(&h, masked).vector_mask.unwrap().path.subpaths.len(), 2);
     assert!(h.state().session.active().unwrap().doc.work_path.is_none(), "not a work path");
@@ -550,4 +545,61 @@ fn command_i_inverts_the_targeted_mask() {
     let st = app.session.active().unwrap();
     let mask = &st.doc.layer(st.active_layer.unwrap()).unwrap().mask.as_ref().unwrap().surface;
     assert_eq!(mask.sample_channel(10, 10, 0), 0.0, "reveal all → hide all");
+}
+
+/// #2420: Selecting a layer mask in the Layers panel toggles the color swatches
+/// to the mask's colors (white/black by default), and deselecting toggles back.
+#[test]
+fn selecting_mask_thumbnail_toggles_swatches_to_mask_colors_and_back() {
+    const RED: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
+    const BLUE: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
+    const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+    const BLACK: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+
+    let (mut s, masked, _) = dotted();
+    s.execute("tools.setColors", json!({"foreground": "#ff0000", "background": "#0000ff"})).unwrap();
+    let mut h = harness(s, 0, 1.0, 290.0);
+
+    // Initial state: layer pixels targeted, red foreground, blue background.
+    assert!(!h.state().ui.mask_target);
+    assert_eq!(h.state().session.tools.foreground, RED);
+    assert_eq!(h.state().session.tools.background, BLUE);
+
+    // 1. Click mask thumbnail in Layers panel -> targets mask, swatches toggle to mask colors.
+    let r_mask = mask_rect(&h, masked, MaskKind::Pixel);
+    click_with(&mut h, r_mask.center(), Modifiers::NONE);
+    assert!(h.state().ui.mask_target, "mask thumbnail clicked: mask is targeted");
+    assert_eq!(h.state().session.tools.foreground, WHITE);
+    assert_eq!(h.state().session.tools.background, BLACK);
+
+    // 2. Click layer thumbnail -> deselects mask, swatches toggle back to pixel colors.
+    let r_layer = layer_thumb_center(&h, masked);
+    click_with(&mut h, r_layer, Modifiers::NONE);
+    assert!(!h.state().ui.mask_target, "layer thumbnail clicked: pixels are targeted");
+    assert_eq!(h.state().session.tools.foreground, RED);
+    assert_eq!(h.state().session.tools.background, BLUE);
+
+    // 3. Click mask thumbnail again -> swatches toggle back to mask colors.
+    click_with(&mut h, r_mask.center(), Modifiers::NONE);
+    assert!(h.state().ui.mask_target);
+    assert_eq!(h.state().session.tools.foreground, WHITE);
+    assert_eq!(h.state().session.tools.background, BLACK);
+
+    // 4. Changing mask colors preserves them when switching away and back.
+    h.state_mut().run("tools.setColors", json!({"foreground": "#808080"})).unwrap();
+    let grey = h.state().session.tools.foreground;
+    assert_eq!(grey, [128.0 / 255.0, 128.0 / 255.0, 128.0 / 255.0, 1.0]);
+
+    click_with(&mut h, r_layer, Modifiers::NONE);
+    assert_eq!(h.state().session.tools.foreground, RED, "pixel colors restored");
+
+    click_with(&mut h, r_mask.center(), Modifiers::NONE);
+    assert_eq!(h.state().session.tools.foreground, grey, "mask colors restored");
+
+    // 5. Creating a new adjustment layer targets its mask and toggles to mask colors.
+    click_with(&mut h, r_layer, Modifiers::NONE);
+    assert_eq!(h.state().session.tools.foreground, RED);
+    h.state_mut().run("layer.newAdjustmentLayer.curves", json!({})).unwrap();
+    assert!(h.state().ui.mask_target, "new adjustment layer targets its mask");
+    assert_eq!(h.state().session.tools.foreground, grey);
 }

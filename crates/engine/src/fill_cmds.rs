@@ -171,6 +171,12 @@ pub(crate) fn composite_over(surf: &mut Surface, src: &Surface, area: Rect, limi
     blend_into(surf, area, &source, limit, Blend { mode: BlendMode::Normal, opacity: 1.0, keep_alpha: false, restore: false })
 }
 
+/// `area` of `surf` filled with an opaque `color` (Normal, 100 %), weighted by `sel` when given:
+/// Clear on a targeted alpha channel or the Quick Mask (#2734).
+pub(crate) fn fill_color(surf: &mut Surface, area: Rect, color: [f32; 4], sel: Option<&Surface>) -> Result<()> {
+    blend_into(surf, area, &Source::Color(color), sel, Blend { mode: BlendMode::Normal, opacity: 1.0, keep_alpha: false, restore: false })
+}
+
 /// Reuse Edit › Fill's compositing for Edit › Stroke. The stroke's rasterized band
 /// is already a grayscale coverage mask; opacity, blend modes and alpha locking
 /// must behave identically for both commands at 8/16/32-bit depth.
@@ -345,7 +351,7 @@ fn blend_tile(bytes: &mut [u8], fmt: &photocraft_color::PixelFormat, origin: Rec
             let mut bytes = vec![0u8; bpp];
             photocraft_raster::encode_pixel(fmt, enc.get(..m.min(n)).unwrap_or(&[]), &mut bytes);
             // Keeping alpha: copy the colour samples only (alpha is the last sample).
-            let keep = if (keep_alpha || !fmt.alpha) && fmt.alpha { bpp - bpp / n.max(1) } else { bpp };
+            let keep = if keep_alpha && fmt.alpha { bpp - bpp / n.max(1) } else { bpp };
             Some((bytes, keep))
         }
         _ => None,
@@ -456,7 +462,7 @@ mod tests {
         assert!(blacks > 300 && blacks < 900, "{blacks}");
         assert!((0..40).all(|x| {
             let v = surf.rgba(x, 3)[0];
-            v < 0.01 || v > 0.99
+            !v.is_nan() && !(0.01..=0.99).contains(&v)
         }));
     }
 

@@ -100,6 +100,19 @@ pub(crate) fn reselect(s: &mut Session, ids: Vec<LayerId>, active: Option<LayerI
     }
 }
 
+/// Layer rows follow the Layers panel's visual order, not Document::walk's storage order.
+/// Closed groups hide their children unless both endpoints were selected programmatically.
+fn range_order(layers: &[Layer], include_collapsed: bool, out: &mut Vec<LayerId>) {
+    for layer in layers.iter().rev() {
+        out.push(layer.id);
+        if let LayerContent::Group(group) = &layer.content
+            && (group.expanded || include_collapsed)
+        {
+            range_order(&group.children, include_collapsed, out);
+        }
+    }
+}
+
 /// `layer.select`: `{"layer": id, "mode": "replace|toggle|range|add"}`.
 pub fn select(s: &mut Session, p: &Value) -> Result<Value> {
     let id = LayerId(p.get("layer").and_then(Value::as_u64).ok_or_else(|| bad("layer.select", "missing `layer`"))?);
@@ -133,7 +146,14 @@ pub fn select(s: &mut Session, p: &Value) -> Result<Value> {
         }
         "range" => {
             let anchor = st.layer_anchor.filter(|a| st.doc.layer(*a).is_some()).or(st.active_layer).unwrap_or(id);
-            let order: Vec<LayerId> = st.doc.walk().into_iter().map(|(_, _, l)| l.id).collect();
+            let mut order = Vec::new();
+            range_order(&st.doc.layers, false, &mut order);
+            // Engine clients may target a child of a collapsed group that the panel cannot
+            // click. Retain that capability by using expanded visual order for such calls.
+            if !order.contains(&anchor) || !order.contains(&id) {
+                order.clear();
+                range_order(&st.doc.layers, true, &mut order);
+            }
             let (a, b) = (order.iter().position(|x| *x == anchor).unwrap_or(0), order.iter().position(|x| *x == id).unwrap_or(0));
             let range = order[a.min(b)..=a.max(b)].to_vec();
             set_selection(s, range, Some(id), Some(anchor))?;
@@ -143,7 +163,7 @@ pub fn select(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"selected": selected(s).iter().map(|l| l.0).collect::<Vec<_>>()}))
 }
 
-fn is_locked_background(l: &Layer) -> bool {
+pub(crate) fn is_locked_background(l: &Layer) -> bool {
     l.name == "Background" && l.locks.transparency && matches!(l.content, LayerContent::Raster(_))
 }
 
@@ -564,6 +584,7 @@ fn doc_pixels_equal(a: &Document, b: &Document) -> bool {
         work_path: _,
         clipping_path: _,
         quick_mask,
+        quick_mask_unselected: _,
         patterns,
         color_table,
         duotone,
@@ -628,10 +649,23 @@ pub fn same_pixels(a: &Document, b: &Document) -> bool {
 /// (clipping, excluded channels — what `layer.setProps` already reports as unbounded), and
 /// video layers.
 pub fn step_damage(a: &Document, b: &Document) -> Option<Rect> {
+    damage_between(a, b, false)
+}
+
+/// [`step_damage`] for an edit from `before` to `after` that may also have added layers which
+/// change pixels only within their own bounds (see [`added_bounds`]), as Duplicate Layer does:
+/// each contributes its change bounds instead of making the whole canvas recomposite. Inserting a
+/// copy of a 12 MP layer used to recomposite every layer of the document (#2883, P8/P9 in
+/// `perf/budgets.toml`).
+pub(crate) fn insert_damage(before: &Document, after: &Document) -> Option<Rect> {
+    damage_between(before, after, true)
+}
+
+fn damage_between(a: &Document, b: &Document, bounded_additions: bool) -> Option<Rect> {
     if !doc_pixels_equal(a, b) {
         return None;
     }
-    fn walk(xs: &[Layer], ys: &[Layer], a: &Document, b: &Document, out: &mut Rect) -> bool {
+    fn walk(xs: &[Layer], ys: &[Layer], a: &Document, b: &Document, added: bool, out: &mut Rect) -> bool {
         // Pair the layers by id, stepping over layers only one side has when they draw nothing
         // (a new empty layer or group, #1771): adding or deleting one changes no pixels.
         let (mut i, mut j) = (0, 0);
@@ -640,6 +674,15 @@ pub fn step_damage(a: &Document, b: &Document) -> Option<Rect> {
                 (None, None) => return true,
                 (Some(x), Some(y)) if x.id == y.id => (x, y),
                 _ if inert_at(ys, j) => {
+                    j += 1;
+                    continue;
+                }
+                _ if added && ys.get(j).is_some_and(|y| xs.iter().all(|x| x.id != y.id)) => {
+                    // A layer only `b` has: bounded when it is self-contained.
+                    let Some(r) = added_bounds(ys, j, b.bounds()) else { return false };
+                    if !r.is_empty() {
+                        *out = if out.is_empty() { r } else { out.union(&r) };
+                    }
                     j += 1;
                     continue;
                 }
@@ -668,7 +711,7 @@ pub fn step_damage(a: &Document, b: &Document) -> Option<Rect> {
             }
             match (x.children(), y.children()) {
                 (Some(xc), Some(yc)) => {
-                    if !walk(xc, yc, a, b, out) {
+                    if !walk(xc, yc, a, b, added, out) {
                         return false;
                     }
                 }
@@ -678,7 +721,24 @@ pub fn step_damage(a: &Document, b: &Document) -> Option<Rect> {
         }
     }
     let mut out = Rect::EMPTY;
-    if walk(&a.layers, &b.layers, a, b, &mut out) { Some(out) } else { None }
+    if walk(&a.layers, &b.layers, a, b, bounded_additions, &mut out) { Some(out) } else { None }
+}
+
+/// The pixels adding `layers[k]` can change, when that is bounded: its change bounds
+/// (`photocraft_compose::change_bounds`: not for an adjustment, or a pass-through group holding
+/// one), provided it doesn't become the clipping base of clipped layers above it, and neither it
+/// nor anything inside it is a video layer or excludes channels (both reach outside the layer's
+/// bounds, see [`step_damage`]).
+fn added_bounds(layers: &[Layer], k: usize, canvas: Rect) -> Option<Rect> {
+    fn contained(l: &Layer, depth: usize) -> bool {
+        depth < 256 && l.video.is_none() && l.excluded_channels == 0 && l.children().is_none_or(|c| c.iter().all(|c| contained(c, depth + 1)))
+    }
+    let l = layers.get(k)?;
+    let new_base = !l.clipped && layers.get(k + 1).is_some_and(|above| above.clipped);
+    if new_base || !contained(l, 0) {
+        return None;
+    }
+    photocraft_compose::change_bounds(l, canvas)
 }
 
 /// Whether `layers[k]` draws nothing wherever it sits, so adding or removing it leaves the
@@ -714,6 +774,13 @@ pub(crate) fn note_inert_insert(s: &mut Session, id: LayerId) {
     if siblings.is_some_and(|sib| inert_at(sib, k)) {
         st.last_damage = Some(Rect::EMPTY);
     }
+}
+
+/// Report the pixels an edit from `before` that added layers changed ([`insert_damage`]), so
+/// the canvas recomposites only where the new layers draw instead of the whole document.
+pub(crate) fn note_insert(s: &mut Session, before: &Document) {
+    let Some(st) = s.active_mut() else { return };
+    st.last_damage = insert_damage(before, &st.doc);
 }
 
 /// Content bounds used by Align/Distribute: the layer's pixels (type and shape layers use their
@@ -934,6 +1001,7 @@ pub fn move_to(s: &mut Session, p: &Value) -> Result<Value> {
     }
 
     let original_active = st.active_layer;
+    let background = crate::background_cmds::background_id(doc);
     let (count, copies) = s.edit(if copy { "Duplicate Layer" } else { "Reorder Layers" }, |doc, active| {
         let mut moved = Vec::with_capacity(moved_ids.len());
         for &id in &moved_ids {
@@ -956,6 +1024,7 @@ pub fn move_to(s: &mut Session, p: &Value) -> Result<Value> {
             siblings.splice(at..at, moved);
         }
         check_group_depth(doc, "Reorder Layer")?;
+        crate::background_cmds::keep_background_at_bottom(background, doc)?;
         *active = if copy {
             copies.last().copied()
         } else if batch.is_some() {
@@ -1056,6 +1125,7 @@ fn rename_layer(s: &mut Session, p: &Value) -> Result<Value> {
 fn reverse(s: &mut Session) -> Result<Value> {
     let sel = selected(s);
     s.edit("Reverse", |doc, _| {
+        let background = crate::background_cmds::background_id(doc);
         let ids = top_level(doc, &sel);
         if ids.len() < 2 {
             return Err(EngineError::Other("select two or more layers to reverse".into()));
@@ -1067,7 +1137,7 @@ fn reverse(s: &mut Session) -> Result<Value> {
         for (path, l) in paths.iter().zip(layers.into_iter().rev()) {
             *doc.layer_at_mut(path).ok_or_else(|| EngineError::Other("layer tree changed".into()))? = l;
         }
-        Ok(())
+        crate::background_cmds::keep_background_at_bottom(background, doc)
     })?;
     Ok(Value::Null)
 }
@@ -1125,15 +1195,11 @@ fn merge_layers(s: &mut Session) -> Result<Value> {
         if solo.layers.is_empty() {
             return Err(EngineError::Other("the selected layers are all hidden".into()));
         }
-        let buf = photocraft_compose::flatten(&solo);
         let fmt = doc.pixel_format();
         let fmt = PixelFormat::new(fmt.mode, fmt.sample, true);
-        let data: Vec<f32> = buf.px.iter().flat_map(|p| photocraft_raster::from_rgba(&fmt, *p)).collect();
         let mut merged = Layer::raster(top.name.clone(), fmt);
         merged.locks = top.locks;
-        let surf = crate::pixels_mut(&mut merged)?;
-        surf.write_region(doc.bounds(), &data);
-        surf.prune();
+        *crate::pixels_mut(&mut merged)? = crate::pixels::composite_layers(&solo, fmt, None);
         let mid = merged.id;
         // Hidden selected layers are discarded, as in Photoshop.
         for id in &ids[..ids.len() - 1] {
@@ -1193,11 +1259,13 @@ pub fn delete_selected(s: &mut Session) -> Result<Value> {
 
 /// Duplicate Layer with several layers selected: each copy goes above its original and the
 /// copies become the selection. Artboard copies go beside their boards unless `in_place`
-/// ([`crate::artboard_cmds::place_copy`]).
-pub fn duplicate_selected(s: &mut Session, in_place: bool) -> Result<Value> {
+/// ([`crate::artboard_cmds::place_copy`]). `label` names the history step (Layer via Copy reuses
+/// this path, #2777).
+pub fn duplicate_selected(s: &mut Session, in_place: bool, label: &str) -> Result<Value> {
     let sel = selected(s);
+    let before = s.active().ok_or(EngineError::NoDocument)?.doc.clone();
     let old_active = s.active().and_then(|d| d.active_layer);
-    let (copies, active) = s.edit("Duplicate Layers", |doc, active| {
+    let (copies, active) = s.edit(label, |doc, active| {
         let mut copies = Vec::new();
         let mut new_active = None;
         for id in top_level(doc, &sel) {
@@ -1217,9 +1285,10 @@ pub fn duplicate_selected(s: &mut Session, in_place: bool) -> Result<Value> {
         *active = a;
         Ok((copies, a))
     })?;
+    note_insert(s, &before);
     let out = copies.iter().map(|l| l.0).collect::<Vec<_>>();
     reselect(s, copies, active);
-    Ok(json!({"layers": out}))
+    Ok(json!({"layers": out, "layer": active.map(|l| l.0)}))
 }
 
 /// Show/hide every selected layer in one step.
@@ -1475,6 +1544,42 @@ mod tests {
         assert_eq!(step_damage(&plain, &before), Some(Rect::EMPTY));
     }
 
+    /// #2883 (P8/P9): a duplicate shares the source's tiles (no pixel copy) and recomposites only
+    /// where it draws; undo brings back exactly the old pixels. A copy that becomes the clipping
+    /// base of the layers above still recomposites everything.
+    #[test]
+    fn duplicate_shares_tiles_and_damages_only_the_copy() {
+        let render = |s: &Session| photocraft_compose::render(doc(s), doc(s).bounds());
+        let tiles =
+            |s: &Session, id: LayerId| doc(s).layer(id).unwrap().surface().unwrap().tiles().map(|(c, t)| (*c, std::sync::Arc::as_ptr(t))).collect::<Vec<_>>();
+        for depth in [8, 16, 32] {
+            let mut s = session(depth);
+            let a = rect_layer(&mut s, Rect::new(10, 10, 20, 20));
+            s.execute("layer.setProps", json!({"layer": a.0, "opacity": 0.5})).unwrap();
+            let shown = render(&s);
+            let copy = LayerId(s.execute("layer.duplicate", json!({"layer": a.0})).unwrap()["layer"].as_u64().unwrap());
+            assert_eq!(damage(&s), Some(Rect::new(10, 10, 20, 20)), "{depth}-bit: only where the copy draws");
+            assert!(!tiles(&s, a).is_empty());
+            assert_eq!(tiles(&s, copy), tiles(&s, a), "{depth}-bit: the copy shares the source's tiles");
+            let now = render(&s);
+            assert_ne!(now, shown, "the half-transparent copy darkens its area");
+            let w = shown.rect.width() as usize;
+            for (i, (p, q)) in shown.px.iter().zip(&now.px).enumerate() {
+                if !Rect::new(10, 10, 20, 20).contains((i % w) as i32, (i / w) as i32) {
+                    assert_eq!(p, q, "{depth}-bit: pixel {i} outside the damage changed");
+                }
+            }
+            s.execute("edit.undo", json!({})).unwrap();
+            assert!(doc(&s).layer(copy).is_none());
+            assert_eq!(render(&s), shown);
+            // A clipping base's copy goes between it and its clipped layer and becomes their base.
+            let clipped = rect_layer(&mut s, Rect::new(0, 0, 50, 50));
+            s.execute("layer.setProps", json!({"layer": clipped.0, "clipped": true})).unwrap();
+            s.execute("layer.duplicate", json!({"layer": a.0})).unwrap();
+            assert_eq!(damage(&s), None, "{depth}-bit: a new clipping base");
+        }
+    }
+
     #[test]
     fn the_move_preview_matches_the_move() {
         let mut s = session(8);
@@ -1726,6 +1831,65 @@ mod tests {
             s.execute("layer.select", json!({"layer": c.0})).unwrap();
             s.execute("layer.mergeLayers", json!({})).unwrap();
             assert_eq!(doc(&s).layer_count(), before - 1);
+        }
+    }
+
+    #[test]
+    fn merging_group_children_preserves_their_composite() {
+        for depth in [8, 16, 32] {
+            let mut s = session(depth);
+            let lower = rect_layer(&mut s, Rect::new(10, 12, 40, 42));
+            let upper = rect_layer(&mut s, Rect::new(25, 20, 55, 50));
+            select_all(&mut s, &[lower, upper]);
+            let group = LayerId(s.execute("layer.groupLayers", json!({"name": "Merge test group"})).unwrap()["layer"].as_u64().unwrap());
+            let doc_before = doc(&s);
+            let expected = photocraft_compose::render(doc_before, doc_before.bounds());
+            let children = doc_before.layer(group).unwrap().children().unwrap().iter().map(|layer| layer.id).collect::<Vec<_>>();
+
+            select_all(&mut s, &children);
+            s.execute("layer.mergeLayers", json!({})).unwrap();
+            let doc_after = doc(&s);
+            let actual = photocraft_compose::render(doc_after, doc_after.bounds());
+            assert_eq!(actual, expected, "depth {depth}: group merge changed rendered pixels");
+            assert_eq!(doc_after.layer(group).unwrap().children().unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn merging_keeps_layer_effects_outside_the_pixels() {
+        // A drop shadow reaches past the layer's pixels; the merge must render that far.
+        for depth in [8, 16, 32] {
+            let mut s = session(depth);
+            let lower = rect_layer(&mut s, Rect::new(10, 10, 30, 30));
+            let upper = rect_layer(&mut s, Rect::new(40, 20, 60, 40));
+            s.execute("layer.layerStyle.dropShadow", json!({"layer": upper.0, "blend": "normal", "distance": 12, "size": 4})).unwrap();
+            let before = photocraft_compose::render(doc(&s), doc(&s).bounds());
+            select_all(&mut s, &[lower, upper]);
+            s.execute("layer.mergeLayers", json!({})).unwrap();
+            let after = photocraft_compose::render(doc(&s), doc(&s).bounds());
+            let worst = before.px.iter().zip(&after.px).map(|(a, b)| a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max)).fold(0.0f32, f32::max);
+            assert!(worst <= 1.5 / 255.0, "depth {depth}: merge layers dropped the shadow (off by {worst})");
+        }
+    }
+
+    #[test]
+    fn merging_a_group_down_preserves_the_composite() {
+        for depth in [8, 16, 32] {
+            let mut s = session(depth);
+            let lower = rect_layer(&mut s, Rect::new(10, 12, 50, 52));
+            let child_a = rect_layer(&mut s, Rect::new(24, 20, 64, 60));
+            let child_b = rect_layer(&mut s, Rect::new(35, 28, 75, 68));
+            select_all(&mut s, &[child_a, child_b]);
+            let group = LayerId(s.execute("layer.groupLayers", json!({"name": "Merge down group"})).unwrap()["layer"].as_u64().unwrap());
+            let doc_before = doc(&s);
+            let expected = photocraft_compose::render(doc_before, doc_before.bounds());
+
+            s.execute("layer.mergeDown", json!({"layer": group.0})).unwrap();
+            let doc_after = doc(&s);
+            let actual = photocraft_compose::render(doc_after, doc_after.bounds());
+            assert_eq!(actual, expected, "depth {depth}: group merge down changed rendered pixels");
+            assert!(doc_after.layer(lower).is_some());
+            assert!(doc_after.layer(group).is_none());
         }
     }
 

@@ -15,6 +15,7 @@
 
 mod codecs;
 mod error;
+pub mod exif_color;
 mod fidelity;
 mod format;
 mod image;
@@ -28,6 +29,7 @@ pub use crate::codecs::png::encode_indexed as encode_png_indexed;
 pub use crate::codecs::tiff::{PhotoshopTags as TiffPhotoshopTags, photoshop_tags as tiff_photoshop_tags, writes_little_endian as tiff_writes_little_endian};
 pub use crate::codecs::tiff_ifd::{TiffInfo, TiffPage, TiffPageKind};
 pub use crate::error::CodecError;
+pub use crate::exif_color::{EXIF_COLOR_SPACE_SRGB, exif_color_space};
 pub use crate::fidelity::{FidelityWarning, fidelity_warnings, fidelity_warnings_with};
 pub use crate::format::{ASYMMETRIC_EXCEPTIONS, Format, FormatCaps, caps, detect, from_extension};
 pub use crate::image::{
@@ -39,7 +41,7 @@ pub use crate::orientation::{exif_orientation, upright_exif, upright_xmp};
 pub use crate::resolution::{exif_resolution, export_exif, export_xmp, photoshop_resolution, xmp_resolution};
 pub use half::f16;
 
-use crate::codecs::{exr, heif, jpeg, png, pnm, tiff, via_image, webp};
+use crate::codecs::{exr, fits, heif, jpeg, png, pnm, tiff, via_image, webp};
 
 /// Detect the format and decode with default [`Limits`].
 pub fn decode(bytes: &[u8]) -> Result<Image, CodecError> {
@@ -70,6 +72,7 @@ pub fn decode_as_with(format: Format, bytes: &[u8], opts: &DecodeOptions) -> Res
         Format::Tiff => tiff::decode(bytes, l),
         Format::WebP => webp::decode(bytes, l),
         Format::Pnm => pnm::decode(bytes, l),
+        Format::Fits => fits::decode(bytes, l),
         Format::OpenExr => exr::decode(bytes, l),
         Format::Heif => heif::decode(bytes, l, opts.keep_orientation),
         Format::Gif | Format::Bmp | Format::Tga | Format::Ico | Format::Qoi | Format::Hdr | Format::Avif => via_image::decode(format, bytes, l),
@@ -164,6 +167,14 @@ pub fn decode_cryptomatte(bytes: &[u8], layer_name: &str, limits: &Limits) -> Re
     codecs::exr_cryptomatte::decode(bytes, layer_name, limits)
 }
 
+/// Decodes the named channels of one part (exact names as the file stores them, e.g.
+/// `diffuse.R`) into an image: R/G/B (plus A when named) give Rgba, a lone Y gives Gray.
+/// This renders a channel group without the part's other channels in the way.
+pub fn decode_exr_channels(bytes: &[u8], part: usize, names: &[&str], opts: &DecodeOptions) -> Result<Image, CodecError> {
+    let img = exr::decode_channels(bytes, part, names, &opts.limits)?;
+    finish_decode(img, 1, opts)
+}
+
 /// Deep OpenEXR samples (`deepscanline`/`deeptile`): the structured per-pixel sample lists
 /// (colour, alpha and Z per sample), for callers that composite deep data themselves —
 /// [`decode_as_with`] instead flattens a deep file into a normal [`Image`] with a
@@ -196,6 +207,7 @@ pub fn encode(image: &Image, format: Format, opts: &EncodeOptions) -> Result<Vec
         Format::Tiff => tiff::encode(image, plan, opts),
         Format::WebP => webp::encode(image, plan, opts),
         Format::Pnm => pnm::encode(image, plan, opts),
+        Format::Fits => fits::encode(image, plan, opts),
         Format::OpenExr => exr::encode(image, plan, opts),
         Format::Heif => Err(CodecError::unsupported(format, "encoding is not available in this build")),
         Format::Gif | Format::Bmp | Format::Tga | Format::Ico | Format::Qoi | Format::Hdr | Format::Avif => via_image::encode(format, image, plan, opts),

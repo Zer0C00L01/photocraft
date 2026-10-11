@@ -15,6 +15,23 @@
 # Product and technology names (PhotoCraft, ArtCraft, OpenType, CMYK, Lab ...) stay in Latin
 # letters; the trailing "…" of dialog commands is kept.
 
+# Guide layout dialog
+	Rows	行
+	Number	数
+	Top:	上:
+	Left:	左:
+	Bottom:	下:
+	Right:	右:
+	Target:	対象:
+	Selected Artboards	選択したアートボード
+	Center Columns	列を中央に配置
+	Clear Existing Guides	既存のガイドを削除
+	Invalid guide layout	ガイドレイアウトが無効です
+	Leave empty for automatic size	自動サイズにするには空欄にします
+	5 Columns, 3 Rows	5列、3行
+	8 Columns	8列
+	12 Columns	12列
+
 	File	ファイル
 	Edit	編集
 	Image	画像
@@ -36,8 +53,15 @@
 	New from Clipboard	クリップボードから新規作成
 	Open…	開く…
 	Open As…	形式を指定して開く…
+	Open EXR Parts…	EXRパートを開く…
+	Add beauty precomp from the AOVs	AOVからビューティーをプリコンポーズして追加
+	Both	両方
+	Left	左
+	Right	右
 	Open Recent	最近使ったファイルを開く
 	Clear Recent Files	最近使ったファイルを消去
+	Remove from Recent	最近使ったファイルから削除
+	Remove {name} from Recent	{name} を最近使ったファイルから削除
 	Close	閉じる
 	Minimize	最小化
 	Maximize	最大化
@@ -262,6 +286,7 @@
 	Layer via Cut	切り取ったレイヤー
 	Layer From Background…	背景からレイヤーへ…
 	Layer from Background…	背景からレイヤーへ…
+	Background From Layer	レイヤーから背景
 	New Shape Layer	新規シェイプレイヤー
 	New Type Layer	新規文字レイヤー
 	New Fill Layer	新規塗りつぶしレイヤー
@@ -475,6 +500,12 @@
 	Color Range…	色域指定…
 	Focus Area…	焦点領域…
 	Select and Mask…	選択とマスク…
+# Select and Mask dialog labels
+	Smart Radius	スマート半径
+	Shift Edge	エッジをシフト
+	Decontaminate	混入を除去
+	Output	出力
+	Refine Edge	境界線を調整
 	Modify	選択範囲を修正
 	Border…	境界…
 	Smooth…	滑らかに…
@@ -589,6 +620,10 @@
 	100%	100%
 	200%	200%
 	75%	75%
+	80%	80%
+	85%	85%
+	90%	90%
+	95%	95%
 	125%	125%
 	150%	150%
 	175%	175%
@@ -670,10 +705,15 @@
 	New Workspace…	新規ワークスペース…
 	Delete Workspace…	ワークスペースを削除…
 	Reset Workspace	ワークスペースをリセット
+	Reset Tool	ツールをリセット
+	Reset All Tools	すべてのツールをリセット
+	Reset all tools to their default settings?	すべてのツールを初期設定に戻しますか？
 	Lock Workspace	ワークスペースをロック
 	Theme	テーマ
 	Pro Theme	プロテーマ
 	Pro Medium Gray Theme	プロ(中間グレー)テーマ
+	Pro Light Gray Theme	プロ(ライトグレー)テーマ
+	Pro Light Theme	プロ(ライト)テーマ
 	Studio Theme	スタジオテーマ
 	Studio Light Theme	スタジオ(ライト)テーマ
 	Adwaita Light Theme	Adwaita(ライト)テーマ
@@ -681,6 +721,10 @@
 	Classic Theme	クラシックテーマ
 	Solarized dark	Solarized ダーク
 	Solarized Dark Theme	Solarized ダークテーマ
+	Breeze dark	Breeze ダーク
+	Breeze Dark Theme	Breeze ダークテーマ
+	Breeze light	Breeze ライト
+	Breeze Light Theme	Breeze ライトテーマ
 	Next Theme	次のテーマ
 	Actions	アクション
 	Brush Settings	ブラシ設定
@@ -730,6 +774,7 @@
 	Split Warp Horizontally	ワープを水平方向に分割
 	Split Warp Vertically	ワープを垂直方向に分割
 	Statistics…	統計情報…
+	Refine Strokes	調整ストローク
 @plural	{n} item|{n} items	{n} 件
 	Auto	自動
 
@@ -805,6 +850,9 @@
 	Bend:	曲げ:
 	Bicubic	バイキュービック
 	Bicubic (smooth gradients)	バイキュービック(滑らかな階調)
+	Automatic	自動
+	Bicubic Smoother (enlargement)	バイキュービック法 - 滑らか(拡大)
+	Bicubic Sharper (reduction)	バイキュービック法 - シャープ(縮小)
 	Bilinear	バイリニア
 	Black	黒
 	Black & White	白黒
@@ -815,7 +863,6 @@
 	Blending Options	描画オプション
 	Blue	青
 	Blue, Red, Yellow	青、赤、黄
-	Both	両方
 	Both Axes	両方の軸
 	Bottom	下
 	Brightness	明るさ
@@ -862,6 +909,7 @@
 	Click to zoom in  ·  {key}-click to zoom out  ·  drag right/left to zoom in/out	クリックで拡大 · {key}+クリックで縮小 · 右/左にドラッグで拡大/縮小
 	Click with the Note tool to add a note.	注釈ツールでクリックすると注釈を追加できます。
 	Click: corner · Drag: smooth · Click first point: close · {key} finish · Esc cancel	クリック: 角 · ドラッグ: 滑らか · 最初の点をクリック: 閉じる · {key} 完了 · Esc キャンセル
+	Click: corner · Drag: smooth · {alt}-drag: break handle · Click or drag first point: close · {key} finish · Esc cancel	クリック: 角 · ドラッグ: 滑らか · {alt}+ドラッグ: ハンドルを分割 · 最初の点をクリックまたはドラッグ: 閉じる · {key} 完了 · Esc キャンセル
 	Clip to layer below	下のレイヤーでクリッピング
 	Clipped	クリッピング済み
 	Close Style Options	スタイルオプションを閉じる
@@ -1134,7 +1182,6 @@
 	Leading	行送り
 	Leading (set to the font size × auto-leading when Auto)	行送り(自動のときはフォントサイズ × 自動行送り)
 	Leave as is (don't color manage)	そのまま(カラーマネジメントしない)
-	Left	左
 	Left align text	左揃え
 	Length:	長さ:
 	Level	レベル
@@ -1306,6 +1353,7 @@
 	Record ● a sequence of edits, then play ▶ it on any document.	一連の編集を記録 ● し、任意のドキュメントで再生 ▶ できます。
 	Red	赤
 	Redefine style by current selection	現在の選択でスタイルを再定義
+	Refine	調整
 	Reflected Gradient	反射形グラデーション
 	Registration Marks	見当合わせマーク
 	Regular	レギュラー
@@ -1343,7 +1391,6 @@
 	Restore All	すべて復元
 	Restore Defaults	既定に戻す
 	Restrictive (Web)	制限(Web)
-	Right	右
 	Right align text	右揃え
 	Rigid	剛体
 	Rotate:	回転:
@@ -1488,6 +1535,7 @@
 	White Balance: As Shot	ホワイトバランス: 撮影時の設定
 	Whites	白レベル
 	Width	幅
+	Slant	傾斜
 	Width:	幅:
 	Work Path	作業用パス
 	Yellow	イエロー
@@ -1505,6 +1553,8 @@
 	↑↓ navigate   {key} run   esc close	↑↓ 移動   {key} 実行   esc 閉じる
 	Version {version}	バージョン {version}
 	New Document	新規ドキュメント
+	New Document With Mask	新規ドキュメント（マスク付き）
+	New Layer With Mask	新規レイヤー（マスク付き）
 	Saved	保存済み
 	Save Preset…	プリセットを保存…
 	Preset Name	プリセット名
@@ -1527,6 +1577,7 @@
 	Blur Tool	ぼかしツール
 	Bold	ボールド
 	Brush	ブラシ
+	Block	ブロック
 	Brush Pose	ブラシの姿勢
 	Brush Tip Shape	ブラシ先端のシェイプ
 	Brush Tool	ブラシツール
@@ -1576,6 +1627,8 @@
 	Efficiency: 100%	効率: 100%
 	Ellipse Tool	楕円形ツール
 	Elliptical Marquee Tool	楕円形選択ツール
+	Single Row Marquee Tool	一行選択ツール
+	Single Column Marquee Tool	一列選択ツール
 	Emboss	エンボス
 	Eraser	消しゴム
 	Eraser Tool	消しゴムツール
@@ -1598,6 +1651,8 @@
 	Highlights from:	ハイライトの開始:
 	History Brush Tool	ヒストリーブラシツール
 	Horizontal Type Tool	横書き文字ツール
+	Horizontal Type Mask Tool	横書き文字マスクツール
+	Vertical Type Mask Tool	縦書き文字マスクツール
 	Image Size:	画像サイズ:
 	Inches	インチ
 	Indexed	インデックス
@@ -1633,6 +1688,7 @@
 	Mobile	モバイル
 	Move Tool	移動ツール
 	Could not use the move tool because the layer is locked.	レイヤーがロックされているため、移動ツールを使用できません。
+	Could not complete the Free Transform command because the layer is locked.	レイヤーがロックされているため、自由変形コマンドを完了できません。
 	Multiply	乗算
 	My Brushes	マイブラシ
 	Neutrals	中間色系
@@ -1651,10 +1707,15 @@
 	Paints from the document's opening state	ドキュメントを開いた時点の状態から描画します
 	Path Selection Tool	パスコンポーネント選択ツール
 	Direct Selection Tool	パス選択ツール
+	Add Anchor Point Tool	アンカーポイントの追加ツール
+	Delete Anchor Point Tool	アンカーポイントの削除ツール
+	Click a segment to add an anchor point · {alt}-click an anchor to delete it	セグメントをクリックしてアンカーポイントを追加 · {alt}+クリック: アンカーポイントを削除
+	Click an anchor point to delete it · {alt}-click a segment to add one	アンカーポイントをクリックして削除 · {alt}+クリック: セグメントにアンカーポイントを追加
 	Pattern Overlay	パターンオーバーレイ
 	Pen Pressure	ペンの筆圧
 	Pen Tilt	ペンの傾き
 	Pen Tool	ペンツール
+	Convert Point Tool	アンカーポイントの変換ツール
 	Photo	写真
 	PhotoCraft website	PhotoCraft の Web サイト
 	Picas	パイカ
@@ -1670,6 +1731,8 @@
 	Postcard	はがき
 	Poster	ポスター
 	Pro (Dark)	プロ(ダーク)
+	Pro (Light)	プロ(ライト)
+	Pro (Light Gray)	プロ(ライトグレー)
 	Pro (Medium Gray)	プロ(中間グレー)
 	Protect Texture	テクスチャを保護
 	Purple	紫
@@ -1743,6 +1806,7 @@
 	Invalid {mode} profile	無効な {mode} プロファイル
 	Unnamed {mode} profile	名前のない {mode} プロファイル
 	{w} px x {h} px ({ppi} ppi)	{w} px × {h} px ({ppi} ppi)
+	{w} {unit} x {h} {unit} ({ppi} ppi)	{w} {unit} × {h} {unit} ({ppi} ppi)
 	Resolution: {dpi} pixels/inch	解像度: {dpi} ピクセル/インチ
 	Doc: {w} × {h} px	ドキュメント: {w} × {h} px
 	Frame {current} / {total}	フレーム {current} / {total}
@@ -1781,6 +1845,7 @@
 	Cache tile size	キャッシュタイルのサイズ
 	Camera Raw Defaults	Camera Raw の既定値
 	Canvas border	カンバスの境界
+	Show canvas dots	カンバスのドットを表示
 	Canvas color	カンバスの色
 	Canvas custom color	カンバスのカスタム色
 	Color picker	カラーピッカー
@@ -1868,6 +1933,8 @@
 	Preserve details	ディテールを保持
 	Print resolution	印刷解像度
 	Pro	プロ
+	Pro light	プロ(ライト)
+	Pro light gray	プロ(ライトグレー)
 	Pro medium	プロ(中間)
 	Pro photo	ProPhoto
 	Quick export format	クイック書き出しの形式
@@ -1895,6 +1962,7 @@
 	Show only crosshair while painting	描画中は十字線のみ表示
 	Show slice numbers	スライス番号を表示
 	Show tooltips	ツールチップを表示
+	Show highlight on rollover	ロールオーバー時にハイライトを表示
 	Show bounding box when dragging layer	レイヤーのドラッグ中にバウンディングボックスを表示
 	System title bar	システムのタイトルバー
 	Show transformation values	変形値を表示
@@ -2002,6 +2070,7 @@
 	Create Warped Text	ワープテキストを作成
 	Rasterize Smart Object	スマートオブジェクトをラスタライズ
 	Rasterize Fill Content	塗りの内容をラスタライズ
+	Rasterize Layer Style	レイヤースタイルをラスタライズ
 	Unlock: picking a preset replaces these settings	ロック解除: プリセットを選ぶとこの設定は置き換わります
 	Lock: keep these settings when picking another preset	ロック: 別のプリセットを選んでもこの設定を保持します
 	Diameter:	直径:
@@ -2023,6 +2092,7 @@
 	Apply the pen's tilt and rotation to the tip shape	ペンの傾きと回転を先端のシェイプに適用します
 	Mixer Brush	混合ブラシ
 	Mixer Brush Tool	混合ブラシツール
+	Color Replacement Tool	色の置き換えツール
 	Wet	ウェット
 	Mix	混合
 	Wetness Jitter	ウェットのジッター
@@ -2072,7 +2142,9 @@
 	Developing {name}	{name} を現像中
 	Cancelled {label}	{label} をキャンセルしました
 	Esc to cancel	Esc キーでキャンセル
+	Opened {name}	{name} を開きました
 	Opening {name}	{name} を開いています
+	Saved {name}	{name} を保存しました
 	Saving {name}	{name} を保存しています
 	A save to {name} is still running; try again when it finishes	{name} への保存がまだ実行中です。完了してからもう一度お試しください
 	{label} is writing the file and can no longer be cancelled	{label} はファイルを書き込み中のため、キャンセルできません
@@ -2143,6 +2215,9 @@ cameraRaw	Color	カラー
 	Structure:	構造:
 	Content-Aware Move Tool	コンテンツに応じた移動ツール
 	TIFF Options	TIFF オプション
+	Targa Options	Targa オプション
+	24 bits/pixel	24 ビット/ピクセル
+	32 bits/pixel	32 ビット/ピクセル
 	Including layers will increase file size.	レイヤーを含めるとファイルサイズが大きくなります。
 	Discard Layers and Save a Copy	レイヤーを破棄してコピーを保存
 	Don't show again	次回から表示しない
@@ -2204,6 +2279,7 @@ cameraRaw	Color	カラー
 
 # Shared screen eyedropper and text Color Picker (#1128).
 	Color Picker (Text Color)	カラーピッカー（文字色）
+	Color Picker ({name})	カラーピッカー（{name}）
 	Color Picker (Fill Color)	カラーピッカー（塗りつぶしカラー）
 	Fill color	塗りつぶしカラー
 	Color Picker (Stroke Color)	カラーピッカー（線のカラー）
@@ -2231,6 +2307,19 @@ cameraRaw	Color	カラー
 	Domed	ドーム
 	Domed (Inverted)	ドーム (反転)
 	Diagonal (Descending)	斜め (下降)
+	Contour Editor	輪郭エディター
+	Anti-aliased	アンチエイリアス
+	Corner	コーナー
+	Gloss Contour	光沢輪郭
+	Contour	輪郭
+	Cone - Inverted	円錐 - 反転
+	Cove - Deep	入り江 - 深
+	Cove - Shallow	入り江 - 浅
+	Half Round	半円
+	Ring - Double	リング - ダブル
+	Rolling Slope - Descending	ローリングスロープ - 下降
+	Rounded Steps	丸い階段
+	Sawtooth 1	のこぎり波 1
 
 	Red Eye Tool	赤目ツール
 	Red Eye	赤目
@@ -3349,6 +3438,7 @@ fontWeight	Italic	斜体
 	Color to Alpha…	カラーを透明に…
 	Transparency Threshold	透明のしきい値
 	Opacity Threshold	不透明度のしきい値
+	PhotoCraft — Screen Color Picker	PhotoCraft — スクリーンカラーピッカー
 
 	Rasterize svg groups deeper than	この深さを超える SVG グループをラスタライズ
 	0 turns this threshold off; SVG groups nested deeper than 100 levels are always rasterized.	0 でこのしきい値は無効になります。100 階層を超えて入れ子になった SVG グループは常にラスタライズされます。
@@ -3428,5 +3518,91 @@ fontWeight	Italic	斜体
 	Quick Selection found nothing there	クイック選択ではそこに何も見つかりませんでした
 	Object Selection found nothing there — try a tighter rectangle	オブジェクト選択ではそこに何も見つかりませんでした — より狭い長方形で試してください
 	No subject found — try a rectangle around the object	被写体が見つかりません — オブジェクトを囲む長方形を試してください
+	Click the first point or press {key} to close · {del} removes a point · Esc cancels	最初の点をクリックするか {key} を押して閉じる · {del} で点を削除 · Esc でキャンセル
+	Click, then move along an edge · click to fasten a point · {alt}-click for a straight segment · double-click to close	クリックしてエッジに沿って動かす · クリックで固定ポイント · {alt}-クリックで直線セグメント · ダブルクリックで閉じる
+	Follows only edges this close to the pointer ([ and ] change it)	ポインターからこの距離内のエッジだけをたどる（[ と ] で変更）
+	Higher values follow only edges that contrast sharply with their surroundings	値を大きくすると、周囲とのコントラストが強いエッジだけをたどる
+	How often fastening points are placed by themselves	固定ポイントが自動で置かれる頻度
+	Appearance Settings…	外観設定…
+	Add to favorites	お気に入りに追加
+	Remove from favorites	お気に入りから削除
+# File Info ▸ Camera Data (read-only EXIF fields; "Make" is the camera maker, not the verb).
+cameraData	Make	メーカー
+cameraData	Model	モデル
+cameraData	Date Taken	撮影日時
+cameraData	Exposure	露出時間
+cameraData	F-Stop	絞り値
+cameraData	ISO Speed	ISO 感度
+cameraData	Focal Length	焦点距離
+cameraData	Focal Length (35 mm)	焦点距離 (35 mm 換算)
+cameraData	Lens	レンズ
+# Shared panel docking
+	Activate Panel	パネルをアクティブにする
+	Change Panel Group	パネルグループを変更
+	Change Panel Layout	パネルレイアウトを変更
+	Close Panel	パネルを閉じる
+	Dock Panel	パネルをドッキング
+	Float Panel	パネルをフロート
+	Move Panel	パネルを移動
+	Group with	グループ化するパネル
+	Panel menu	パネルメニュー
+	Resize panel window	パネルウィンドウのサイズを変更
+	Resize panels	パネルのサイズを変更
+	Use Classic Mode	クラシックモードを使用
+	Auto Center Preview	プレビューを自動的に中央に配置
+	Next Document	次のドキュメント
+	Previous Document	前のドキュメント
 	W x H x Resolution	幅 x 高さ x 解像度
 	Front Image	前面の画像
+	Frame Tool	フレームツール
+	Create a new rectangular frame	新しい長方形フレームを作成
+	Create a new elliptical frame	新しい楕円形フレームを作成
+	Include in playback	再生に含める
+	Perspective Crop Tool	遠近法の切り抜きツール
+	Show Grid	グリッドを表示
+	Drag a box or click four corners · drag the corners onto the edges of a skewed shape · {commit} commits · Esc cancels	ボックスをドラッグするか 4 つの角をクリック · 角を傾いた形の端までドラッグ · {commit} で確定 · Esc でキャンセル
+	Artboard Tool	アートボードツール
+	Make Portrait	縦向きにする
+	Make Landscape	横向きにする
+	Add New Artboard	新規アートボードを追加
+	Freeform Pen Tool	フリーフォームペンツール
+	Curvature Pen Tool	曲線ペンツール
+	Curve Fit:	カーブフィット:
+	Drag: draw freehand · Release on the start point: close	ドラッグ: フリーハンドで描画 · 始点で離す: 閉じる
+	Click: smooth point · Double-click: corner · Drag a point: move · Click first point: close · {key} finish	クリック: スムーズポイント · ダブルクリック: 角 · 点をドラッグ: 移動 · 最初の点をクリック: 閉じる · {key} 完了
+	New Crop Preset…	新規切り抜きプリセット…
+	Delete Crop Preset…	切り抜きプリセットを削除…
+	Select the crop presets to delete:	削除する切り抜きプリセットを選択してください:
+	Select the crop presets to delete	削除する切り抜きプリセットを選択してください
+	Enter a name for the crop preset	切り抜きプリセットの名前を入力してください
+	There is no crop size or ratio to save	保存する切り抜きのサイズまたは比率がありません
+	Scale:	比率:
+	Snap to Origin	原点にスナップ
+	Search settings…	設定を検索…
+	No matching settings	一致する設定はありません
+	Loading fonts…	フォントを読み込み中…
+# Select and Mask view modes (#1754)
+	Onion Skin	オニオンスキン
+	Marching Ants	点線の境界
+	On Black	黒地
+	On White	白地
+	On Layers	レイヤー上
+	Show Edge	エッジを表示
+	Show Original	元の状態を表示
+	F cycles the views; hold X to see the image	F で表示を切り替え、X を押している間は画像を表示
+# Select and Mask Refine Edge Brush (#2972)
+	Refine Edge Brush (R)	境界線調整ブラシ (R)
+	Expand Detection Area	検出領域を拡張
+	Restore Original Edge	元のエッジを復元
+	Paint over hair or fur on the image; Alt paints the other mode	画像の髪や毛の上をペイントします。Alt で反対のモードでペイント
+	Clear Brush Strokes	ブラシストロークを消去
+	Show rulers	定規を表示
+
+# Color Sampler (added with the i18n coverage repair)
+	Click to place · Alt-click or drag off-canvas to remove	クリックで配置 · Alt キーを押しながらクリック、またはカンバス外へドラッグで削除
+	No document open	ドキュメントが開かれていません
+	{n} of {max} sample points	{max} 個中 {n} 個のサンプルポイント
+# Print dialog (#2697)
+	Emulsion Down	乳剤面を下
+	Functions	機能
+	Print Resolution:	プリント解像度:

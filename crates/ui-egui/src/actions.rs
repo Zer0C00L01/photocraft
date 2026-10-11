@@ -68,6 +68,9 @@ pub struct ActionsUi {
     /// Insert Stop draft.
     #[serde(skip)]
     stop_message: Option<StopDraft>,
+    /// The action whose name is being edited in place (double-click on its name).
+    #[serde(skip)]
+    renaming: Option<RenameAction>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -97,8 +100,51 @@ struct StopDraft {
     allow_continue: bool,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct RenameAction {
+    index: usize,
+    text: String,
+    focused: bool,
+}
+
 fn step_key(name: &str, step: usize) -> String {
     format!("{name}\t{step}")
+}
+
+/// The in-place name field of the action being renamed. Enter, Tab or clicking elsewhere
+/// returns the new name to commit; Escape cancels and keeps the old name.
+fn rename_field(app: &mut PhotocraftApp, ui: &mut egui::Ui, index: usize, rect: Rect) -> Option<String> {
+    let mut r = app.ui.actions.renaming.take().filter(|r| r.index == index)?;
+    let id = egui::Id::new(("action-rename-field", index));
+    let te = ui.put(rect, egui::TextEdit::singleline(&mut r.text).id(id).font(egui::FontId::proportional(12.0)));
+    if !r.focused {
+        te.request_focus();
+        // Like Photoshop, the whole name starts selected so typing replaces it.
+        if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), id) {
+            let all = egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(r.text.chars().count()));
+            state.cursor.set_char_range(Some(all));
+            state.store(ui.ctx(), id);
+        }
+        r.focused = true;
+        app.ui.actions.renaming = Some(r);
+        return None;
+    }
+    let (enter, tab, esc) = ui.input(|i| (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Tab), i.key_pressed(egui::Key::Escape)));
+    if esc {
+        None
+    } else if enter || tab || te.lost_focus() || !te.has_focus() {
+        Some(r.text)
+    } else {
+        app.ui.actions.renaming = Some(r);
+        None
+    }
+}
+
+fn rename_action(app: &mut PhotocraftApp, index: usize, name: String) {
+    if let Err(e) = app.run("actions.rename", json!({"action": index, "name": name})) {
+        app.ui.status = format!("Could not rename the action: {e}");
+        app.ui.status_error = true;
+    }
 }
 
 fn label_of(id: &str) -> String {
@@ -136,8 +182,10 @@ fn playback_selection(app: &PhotocraftApp) -> Option<usize> {
 }
 
 /// Steps in the `[[id, params], …]` shape batch and droplets already accept.
+/// Steps in the `[[id, params], …]` shape batch and droplets already accept, without the
+/// steps switched off in the panel.
 pub fn action_steps(action: &Action) -> Vec<Value> {
-    action.steps.iter().map(|(id, p)| json!([id, p])).collect()
+    action.steps.iter().enumerate().filter(|(i, _)| action.step_on(*i)).map(|(_, (id, p))| json!([id, p])).collect()
 }
 
 /// Named action bindings use the existing persisted shortcut overrides. Keeping the
@@ -184,6 +232,13 @@ pub(crate) fn play(app: &mut PhotocraftApp, params: &Value) -> Result<Value, Str
             }
             if id == "actions.play" {
                 play(app, p)
+            } else if actions_cmds::shell_save_command(id) {
+                // Write synchronously, so the next step doesn't meet a document locked by a
+                // background save.
+                let background = std::mem::replace(&mut app.background_jobs, false);
+                let r = app.replay_save(id, p);
+                app.background_jobs = background;
+                r
             } else if actions_cmds::shell_view_command(id) {
                 app.sync_views();
                 app.run(id, p.clone())
@@ -957,7 +1012,7 @@ fn pump(app: &mut PhotocraftApp, ctx: &egui::Context) {
             let honor = cursor.honor_enabled;
             let mode = cursor.mode;
             app.ui.actions.playback = None;
-            if rest.first().is_some() {
+            if !rest.is_empty() {
                 app.ui.actions.playback_mode = mode;
                 queue_playback(app, rest, 0, honor);
                 if app.ui.actions.playback.is_none() {
@@ -1299,6 +1354,7 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     }
     let max_h = (ui.available_height() - 70.0).clamp(80.0, 320.0);
     let mut moved = None;
+    let mut renamed = None;
     let recording_row = recording.and_then(|(_, i)| rows.get(i).map(|(_, steps)| (i, steps.len())));
     let reveal = recording_row.filter(|row| app.ui.actions.reveal_recording != Some(*row));
     app.ui.actions.reveal_recording = recording_row;
@@ -1445,7 +1501,18 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                 ui.painter().add(egui::Shape::convex_polygon(pts, t.text_dim, Stroke::NONE));
                 let recording_this = recording.is_some_and(|(_, r)| r == i);
                 let nsteps = steps.len();
-                ui.painter().text(pos2(rect.left() + 80.0, rect.center().y), Align2::LEFT_CENTER, name, egui::FontId::proportional(12.0), t.text);
+                let name_rect = if app.ui.actions.renaming.as_ref().is_some_and(|r| r.index == i) {
+                    let field = Rect::from_min_max(
+                        pos2(rect.left() + 76.0, rect.top() + 3.0),
+                        pos2((rect.right() - 80.0).max(rect.left() + 160.0), rect.bottom() - 3.0),
+                    );
+                    if let Some(text) = rename_field(app, ui, i, field) {
+                        renamed = Some((i, text));
+                    }
+                    field
+                } else {
+                    ui.painter().text(pos2(rect.left() + 80.0, rect.center().y), Align2::LEFT_CENTER, name, egui::FontId::proportional(12.0), t.text)
+                };
                 ui.painter().text(
                     pos2(rect.right() - 8.0, rect.center().y),
                     Align2::RIGHT_CENTER,
@@ -1514,7 +1581,12 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                     }
                 });
                 if resp.double_clicked() && resp.interact_pointer_pos().is_none_or(|p| p.x >= rect.left() + 56.0) {
-                    open_options(app, i);
+                    // Double-click the name to rename in place. The rest of the row opens Action Options.
+                    if resp.interact_pointer_pos().is_some_and(|p| name_rect.expand2(vec2(4.0, 8.0)).contains(p)) {
+                        app.ui.actions.renaming = Some(RenameAction { index: i, text: name.clone(), focused: false });
+                    } else {
+                        open_options(app, i);
+                    }
                 }
                 if expanded {
                     for (step, (id, params)) in steps.iter().enumerate() {
@@ -1602,6 +1674,9 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
             move_row(app, source, to);
         }
     }
+    if let Some((index, name)) = renamed {
+        rename_action(app, index, name);
+    }
     if app.ui.actions.options.is_none() && app.ui.actions.stop_message.is_none() {
         step_editor(app, ui);
     }
@@ -1663,6 +1738,71 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn double_clicking_an_action_name_renames_it_in_place() {
+        use egui_kittest::{Harness, kittest::Queryable};
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({"width": 32, "height": 32})).unwrap();
+        app.session.actions.list.push(Action::new("Action 1".into(), vec![("layer.new.layer".into(), json!({}))]));
+        let layers = app.session.active().unwrap().doc.layers.len();
+        // 60 fps steps, so two clicks a frame apart count as a double-click.
+        let mut h = Harness::builder().with_size(vec2(320.0, 260.0)).with_step_dt(1.0 / 60.0).build_ui_state(|ui, app| panel(app, ui), app);
+        h.run_steps(3);
+        let rename = |h: &mut Harness<'_, PhotocraftApp>, text: &str| {
+            // The name is painted 80px into the row, past the check, dialog and disclosure marks.
+            let name = h.get_by_label("Action 1").rect().left_center() + vec2(100.0, 0.0);
+            h.event(egui::Event::PointerMoved(name));
+            h.run_steps(30);
+            for pressed in [true, false, true, false] {
+                h.event(egui::Event::PointerButton { pos: name, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE });
+                h.step();
+            }
+            h.run_steps(3);
+            h.event(egui::Event::Text(text.into()));
+            h.run_steps(1);
+            h.key_press(egui::Key::Enter);
+            h.run_steps(3);
+        };
+        rename(&mut h, "  ");
+        assert_eq!(h.state().session.actions.list[0].name, "Action 1");
+        assert!(h.state().ui.status_error);
+        rename(&mut h, "Sepia");
+        assert_eq!(h.state().session.actions.list[0].name, "Sepia");
+        assert_eq!(h.state().session.active().unwrap().doc.layers.len(), layers, "renaming must not play the action");
+    }
+
+    #[test]
+    fn recorded_save_as_and_save_replay_and_write_the_file() {
+        let written = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+        let log = written.clone();
+        let services = crate::Services {
+            export: Some(Box::new(|doc, path, _| {
+                photocraft_io::export(doc, path, &Default::default()).map(|r| (r.bytes, r.warnings)).map_err(|e| e.to_string())
+            })),
+            write: Some(Box::new(move |path, _| {
+                log.borrow_mut().push(path.to_string());
+                Ok(())
+            })),
+            ..Default::default()
+        };
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), services);
+        let ctx = egui::Context::default();
+        app.run("file.new", json!({"width": 16, "height": 16})).unwrap();
+        app.run("actions.record", json!({})).unwrap();
+        app.run("layer.new.layer", json!({})).unwrap();
+        crate::menus::invoke(&mut app, &ctx, "file.saveAs", json!({"path": "out/result.psd"})).unwrap();
+        crate::menus::invoke(&mut app, &ctx, "file.save", json!({})).unwrap();
+        app.run("actions.stop", json!({})).unwrap();
+        let steps = &app.session.actions.list[0].steps;
+        assert_eq!(steps, &[("layer.new.layer".into(), json!({})), ("file.saveAs".into(), json!({"path": "out/result.psd"})), ("file.save".into(), json!({}))]);
+        written.borrow_mut().clear();
+        app.run("file.new", json!({"width": 16, "height": 16})).unwrap();
+        let played = app.run("actions.play", json!({"action": 0})).unwrap();
+        assert!(played.get("failed").is_none(), "{played}");
+        assert_eq!(*written.borrow(), ["out/result.psd", "out/result.psd"]);
+        assert_eq!(app.session.active().unwrap().path.as_deref(), Some("out/result.psd"));
+    }
 
     #[test]
     fn play_button_targets_first_action_if_nothing_is_selected() {
@@ -1848,7 +1988,7 @@ mod tests {
         let idx = app.session.active_index().unwrap();
         assert!(app.ui.views[idx].fit_pending);
         let doc = &app.session.active().unwrap().doc;
-        crate::canvas::fit_view(&mut app.ui.views[idx], doc, vec2(100.0, 100.0), 1.0);
+        crate::canvas::fit_view(&mut app.ui.views[idx], doc, vec2(100.0, 100.0), 1.0, 1.0);
         assert_eq!(app.ui.views[idx].zoom, 0.75);
         assert_eq!(app.ui.views[idx].center, [40.0, 30.0]);
         assert!(!app.ui.views[idx].fit_pending);

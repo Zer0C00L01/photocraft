@@ -414,12 +414,20 @@ impl TextLayer {
             .map(|(len, style)| text::TextRun { len, style })
             .collect()
     }
-    /// Paragraph runs covering exactly `text.len()` bytes.
+    /// Paragraph runs covering exactly `text.len()` bytes, with an optional zero-length
+    /// final run for an empty paragraph after a trailing line break.
     pub fn paragraph_runs(&self) -> Vec<text::ParagraphRun> {
-        normalize_runs(&self.text, self.paragraphs.iter().map(|r| (r.len, r.style.clone())).collect(), text::ParagraphStyle::default())
-            .into_iter()
-            .map(|(len, style)| text::ParagraphRun { len, style })
-            .collect()
+        let mut runs = normalize_runs(&self.text, self.paragraphs.iter().map(|r| (r.len, r.style.clone())).collect(), text::ParagraphStyle::default());
+        // The final empty paragraph owns the synthetic terminal paragraph marker in PSD
+        // text. Its formatting has no source bytes; do not lose that last run when normalizing.
+        if self.text.ends_with(['\r', '\n'])
+            && let Some((last, preceding)) = self.paragraphs.split_last()
+            && last.len <= 1
+            && preceding.iter().try_fold(0usize, |n, r| n.checked_add(r.len)) == Some(self.text.len())
+        {
+            runs.push((0, last.style.clone()));
+        }
+        runs.into_iter().map(|(len, style)| text::ParagraphRun { len, style }).collect()
     }
     /// Copies the first run's family, size and colour into the summary fields.
     pub fn sync_summary(&mut self) {
@@ -708,10 +716,13 @@ impl Layer {
     }
 }
 
+/// Ruler guides in document pixels. f64 like the rest of the view geometry: a guide placed in
+/// ruler units (1 cm at 300 ppi is 118.110236… px) or read from a PSD's 1/32 px positions keeps
+/// its exact place.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Guides {
-    pub horizontal: Vec<f32>,
-    pub vertical: Vec<f32>,
+    pub horizontal: Vec<f64>,
+    pub vertical: Vec<f64>,
 }
 
 /// Which areas an alpha channel's overlay colour marks (Channel Options › Color Indicates).
@@ -799,6 +810,9 @@ pub struct Document {
     /// Select › Edit in Quick Mask Mode: the temporary "Quick Mask" channel while the mode is on.
     /// Part of the document so entering and leaving are history steps (as in Photoshop).
     pub quick_mask: Option<AlphaChannel>,
+    /// Quick Mask was entered with no selection, so an untouched white mask (Color Indicates
+    /// Masked Areas) leaves no selection rather than Select All.
+    pub quick_mask_unselected: bool,
     /// Patterns stored with the document (PSD `Patt`/`Pat2`/`Pat3`): those its layers use, plus
     /// any imported with it.
     pub patterns: Vec<Pattern>,
@@ -850,6 +864,7 @@ impl Document {
             work_path: None,
             clipping_path: None,
             quick_mask: None,
+            quick_mask_unselected: false,
             patterns: Vec::new(),
             color_table: None,
             duotone: None,

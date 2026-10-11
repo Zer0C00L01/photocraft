@@ -18,6 +18,9 @@ described in [development.md](development.md). UI tools require a running deskto
 - `command_batch`: ordered `steps`, optional `stop_on_error`; one history step per command,
   not an atomic transaction. Existing per-step results and reply budgets are preserved.
 - `doc_inspect`: layer tree, history and selection; an empty session returns `document:null`.
+  Every layer (including groups and nested children) reports raster-only `hasMask`,
+  `hasVectorMask` for vector mask presence, and `vectorMaskEnabled` (`true`/`false` when
+  present, `null` when absent). A disabled vector mask still has `hasVectorMask:true`.
 - `render_preview`: bounded PNG content; `index` and `max_side` (default 1024, maximum 2048).
 - `ui_inspect` and `ui_screenshot`: live app state/window in bridge mode.
 

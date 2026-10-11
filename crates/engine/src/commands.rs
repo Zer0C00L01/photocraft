@@ -67,7 +67,9 @@ pub(crate) fn has_paintable(s: &Session) -> std::result::Result<(), String> {
 
 /// Surface a paint command writes to: the layer's pixels, or its mask with `"target":"mask"`.
 pub(crate) fn paint_surface<'a>(doc: &'a mut Document, id: LayerId, p: &Value) -> Result<&'a mut photocraft_raster::Surface> {
-    if !is_mask_target(p) {
+    if is_mask_target(p) {
+        check_all_unlocked(doc, id)?;
+    } else {
         check_pixels_unlocked(doc, id)?;
     }
     let l = doc.layer_mut(id).ok_or(EngineError::NoLayer(id))?;
@@ -76,6 +78,15 @@ pub(crate) fn paint_surface<'a>(doc: &'a mut Document, id: LayerId, p: &Value) -
     } else {
         l.surface_mut().ok_or_else(|| EngineError::Other("not a pixel layer".into()))
     }
+}
+
+fn check_all_unlocked(doc: &Document, id: LayerId) -> Result<()> {
+    let locks = doc.effective_locks(id);
+    let l = doc.layer(id).ok_or(EngineError::NoLayer(id))?;
+    if locks.all {
+        return Err(EngineError::Other(format!("Could not complete your request because the layer \"{}\" is locked", l.name)));
+    }
+    Ok(())
 }
 
 /// Refuse a layer whose pixels are locked (directly or through a group), with Photoshop's message.
@@ -104,6 +115,10 @@ fn has_selection(s: &Session) -> std::result::Result<(), String> {
 
 /// Image › Image Rotation by a right angle or a flip (pixels, vectors, guides, … all move).
 fn turn(s: &mut Session, label: &str, t: crate::canvas_geom::Turn) -> Result<Value> {
+    if let Some(d) = s.active() {
+        let a = t.affine(f64::from(d.doc.size.width), f64::from(d.doc.size.height));
+        s.set_sampler_map(a);
+    }
     s.edit(label, |doc, _| {
         crate::canvas_geom::turn_canvas(doc, t);
         Ok(())
@@ -397,9 +412,19 @@ fn build() -> Vec<CommandSpec> {
             has_pixel_or_channel,
             crate::fill_cmds::fill
         ),
-        cmd!("edit.clear", "Clear", ["Edit"], Some("Delete"), "{}", has_pixel_layer, |s, p| {
-            let id = layer_param(s, p)?;
+        cmd!("edit.clear", "Clear", ["Edit"], Some("Delete"), "{} (a targeted channel or Quick Mask is cleared alone)", has_pixel_or_channel, |s, p| {
             let bg = s.tools.background;
+            // A targeted alpha channel or Quick Mask is filled instead (#2734).
+            if let Some(t) = crate::channel_cmds::targeted_channel(s) {
+                s.edit("Clear", |doc, _| crate::channel_cmds::clear_channel(doc, &t, bg))?;
+                return Ok(Value::Null);
+            }
+            let id = layer_param(s, p)?;
+            // A targeted colour channel clears that channel only (#2720).
+            if let Some(k) = crate::channel_cmds::targeted_color(s) {
+                s.edit("Clear", |doc, _| crate::channel_cmds::clear_color_channel(doc, id, k, bg))?;
+                return Ok(Value::Null);
+            }
             s.edit("Clear", |doc, _| {
                 let sel = doc.selection.clone();
                 let area = sel.as_ref().map(|m| m.content_bounds()).unwrap_or(doc.bounds());
@@ -456,46 +481,24 @@ fn build() -> Vec<CommandSpec> {
                     let area = doc.bounds();
                     // A marquee dragged past the canvas stops at its edge (Photoshop); the ellipse
                     // keeps the dragged shape and is only cut there.
-                    let cut = r.intersect(&area);
-                    let mut shape = Surface::new(photocraft_color::PixelFormat::GRAY8);
-                    if ellipse {
-                        let (cx, cy) = ((r.x0 + r.x1) as f32 / 2.0, (r.y0 + r.y1) as f32 / 2.0);
-                        let (rx, ry) = (r.width() as f32 / 2.0, r.height() as f32 / 2.0);
-                        let inside = |x: f32, y: f32| {
-                            let (dx, dy) = ((x - cx) / rx, (y - cy) / ry);
-                            dx * dx + dy * dy <= 1.0
-                        };
-                        for y in cut.y0..cut.y1 {
-                            for x in cut.x0..cut.x1 {
-                                let (fx, fy) = (x as f32, y as f32);
-                                let corners = [(fx, fy), (fx + 1.0, fy), (fx, fy + 1.0), (fx + 1.0, fy + 1.0)].iter().filter(|(a, b)| inside(*a, *b)).count();
-                                let cov = if !aa {
-                                    if inside(fx + 0.5, fy + 0.5) { 1.0 } else { 0.0 }
-                                } else if corners == 4 {
-                                    1.0
-                                } else {
-                                    let n = (0..16).filter(|i| inside(fx + ((i % 4) as f32 + 0.5) / 4.0, fy + ((i / 4) as f32 + 0.5) / 4.0)).count();
-                                    n as f32 / 16.0
-                                };
-                                if cov > 0.0 {
-                                    shape.write_pixel(x, y, &[cov]);
-                                }
-                            }
-                        }
+                    use photocraft_algo::selection as sel;
+                    let shape = if ellipse {
+                        sel::ellipse_surface(r, area, aa)
                     } else {
-                        shape.fill_rect(cut, &[1.0]);
-                    }
+                        let mut s = Surface::new(photocraft_color::PixelFormat::GRAY8);
+                        s.fill_rect(r.intersect(&area), &[1.0]);
+                        s
+                    };
                     if feather > 0.0 {
-                        use photocraft_algo::selection as sel;
                         let m = sel::feather(&sel::mask_from_surface(Some(&shape), area), area.width() as usize, area.height() as usize, feather);
                         doc.selection = sel::combine(doc.selection.as_ref(), &m, area, sel::SelectionMode::parse(&mode));
                         return Ok(());
                     }
                     let old = doc.selection.take();
                     let combined = match (mode.as_str(), old) {
-                        ("add", Some(o)) => combine(&o, &shape, area, |a, b| a.max(b)),
-                        ("subtract", Some(o)) => combine(&o, &shape, area, |a, b| a * (1.0 - b)),
-                        ("intersect", Some(o)) => combine(&o, &shape, area, |a, b| a.min(b)),
+                        ("add", Some(o)) => sel::combine_surfaces(&o, &shape, area, |a, b| a.max(b)),
+                        ("subtract", Some(o)) => sel::combine_surfaces(&o, &shape, area, |a, b| a * (1.0 - b)),
+                        ("intersect", Some(o)) => sel::combine_surfaces(&o, &shape, area, |a, b| a.min(b)),
                         // With no existing selection, neither operation can select new pixels.
                         ("subtract" | "intersect", None) => Surface::new(photocraft_color::PixelFormat::GRAY8),
                         _ => shape,
@@ -547,9 +550,10 @@ fn build() -> Vec<CommandSpec> {
             |s, p| {
                 let in_place = p.get("inPlace").and_then(Value::as_bool).unwrap_or(false);
                 if crate::layer_multi_cmds::multi(s, p) {
-                    return crate::layer_multi_cmds::duplicate_selected(s, in_place);
+                    return crate::layer_multi_cmds::duplicate_selected(s, in_place, "Duplicate Layers");
                 }
                 let id = layer_param(s, p)?;
+                let before = s.active().ok_or(EngineError::NoDocument)?.doc.clone();
                 let nid = s.edit("Duplicate Layer", |doc, active| {
                     let dup = layer_copy(doc, id)?;
                     let nid = doc.insert_above(Some(id), dup);
@@ -559,6 +563,7 @@ fn build() -> Vec<CommandSpec> {
                     *active = Some(nid);
                     Ok(nid)
                 })?;
+                crate::layer_multi_cmds::note_insert(s, &before);
                 Ok(json!({ "layer": nid.0 }))
             }
         ),
@@ -891,8 +896,13 @@ fn build() -> Vec<CommandSpec> {
             Ok(Value::Null)
         }),
         cmd!("tools.defaultColors", "Default Foreground and Background Colors", [], Some("D"), "{}", always, |s, _| {
-            s.tools.foreground = [0.0, 0.0, 0.0, 1.0];
-            s.tools.background = [1.0, 1.0, 1.0, 1.0];
+            if s.tools.mask_targeted {
+                s.tools.foreground = crate::ToolState::MASK_COLORS[0];
+                s.tools.background = crate::ToolState::MASK_COLORS[1];
+            } else {
+                s.tools.foreground = [0.0, 0.0, 0.0, 1.0];
+                s.tools.background = [1.0, 1.0, 1.0, 1.0];
+            }
             Ok(Value::Null)
         }),
         // Queries (not journaled)
@@ -1119,7 +1129,9 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::gallery_cmds::specs());
     v.extend(crate::gradient_fill_cmds::specs());
     v.extend(crate::solid_fill_cmds::specs());
+    v.extend(crate::pattern_fill_cmds::specs());
     v.extend(crate::type_cmds::specs());
+    v.extend(crate::type_mask_cmds::specs());
     v.extend(crate::transform_cmds::specs());
     v.extend(crate::float_cmds::specs());
     v.extend(crate::vector_cmds::specs());
@@ -1138,12 +1150,15 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::redeye_cmds::specs());
     v.extend(crate::image_cmds::specs());
     v.extend(crate::dtf_cmds::specs());
+    v.extend(crate::perspective_crop_cmds::specs());
     v.extend(crate::selection_cmds::specs());
     v.extend(crate::magnetic_cmds::specs());
     v.extend(crate::select_extra_cmds::specs());
     v.extend(crate::paint_cmds::specs());
     v.extend(crate::extra_cmds::specs());
+    v.extend(crate::background_cmds::specs());
     v.extend(crate::file_cmds::specs());
+    v.extend(crate::exr_cmds::specs());
     v.extend(crate::type_extra_cmds::specs());
     v.extend(crate::type_styles_cmds::specs());
     v.extend(crate::type_spell_cmds::specs());
@@ -1155,6 +1170,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::edit_menu_cmds::specs());
     v.extend(crate::fill_key_cmds::specs());
     v.extend(crate::sample_cmds::specs());
+    v.extend(crate::sampler_cmds::specs());
     v.extend(crate::brush_key_cmds::specs());
     v.extend(crate::stamp_cmds::specs());
     v.extend(crate::align_cmds::specs());
@@ -1183,6 +1199,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::web_cmds::specs());
     v.extend(crate::automate_cmds::specs());
     v.extend(crate::print_cmds::specs());
+    v.extend(crate::installed_profiles::specs());
     v.extend(crate::pick_cmds::specs());
     v.extend(crate::layer_nav_cmds::specs());
     v.extend(crate::frame_cmds::specs());
@@ -1192,6 +1209,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::video_cmds::specs());
     v.extend(crate::jobs::specs());
     v.extend(crate::wia_cmds::specs());
+    v.extend(crate::rasterize_style_cmds::specs());
     v.extend(crate::variables_cmds::specs());
     v.extend(crate::plugin_cmds::specs());
     v.extend(crate::group_view_cmds::specs());
@@ -1254,6 +1272,11 @@ pub fn adjustment_kind(a: &Adjustment) -> &'static str {
 fn arrange(s: &mut Session, p: &Value, delta: i32) -> Result<Value> {
     let id = layer_param(s, p)?;
     s.edit("Arrange", |doc, _| {
+        // The Background stays at the bottom: it doesn't move and nothing goes below it.
+        let bg = crate::background_cmds::background_id(doc);
+        if bg == Some(id) {
+            return Err(EngineError::Other("the Background layer can't be moved".into()));
+        }
         let steps = match delta {
             i32::MAX => 10_000,
             i32::MIN => -10_000,
@@ -1263,6 +1286,10 @@ fn arrange(s: &mut Session, p: &Value, delta: i32) -> Result<Value> {
         let mut moved = false;
         for _ in 0..steps.abs() {
             if !doc.shift(id, dir) {
+                break;
+            }
+            if crate::background_cmds::keep_background_at_bottom(bg, doc).is_err() {
+                doc.shift(id, -dir);
                 break;
             }
             moved = true;
@@ -1286,16 +1313,6 @@ fn set_mask(s: &mut Session, p: &Value, label: &str, mask: Option<LayerMask>) ->
         Ok(())
     })?;
     Ok(Value::Null)
-}
-
-fn combine(a: &Surface, b: &Surface, area: Rect, f: impl Fn(f32, f32) -> f32) -> Surface {
-    let ra = a.read_region(area);
-    let rb = b.read_region(area);
-    let data: Vec<f32> = ra.iter().zip(&rb).map(|(x, y)| f(*x, *y)).collect();
-    let mut out = Surface::new(photocraft_color::PixelFormat::GRAY8);
-    out.write_region(area, &data);
-    out.prune();
-    out
 }
 
 /// Move a layer's pixels, linked mask and type by whole pixels (vectors move via

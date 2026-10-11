@@ -127,6 +127,8 @@ pub(crate) fn import_layered(name: &str, img: &Image, layers: &[u8]) -> Result<I
         let default_filter_mask = &b.key == b"FMsk" && b.data.as_slice() == FILTER_MASK_DEFAULT;
         !empty_pattern && !default_filter_mask
     });
+    // The same nesting limit as opening a PSD (#2940).
+    crate::psd_import::check_group_depth(&file)?;
     let (mut doc, w) = psd_to_document(&file);
     warnings.extend(w);
     doc.name = name.to_string();

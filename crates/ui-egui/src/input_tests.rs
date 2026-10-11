@@ -478,6 +478,7 @@ fn type_tool_alt_arrows_kern_the_pair() {
         anchor: 1,
         session: "kern-test".into(),
         created: false,
+        mask: false,
         dragging: false,
         resize: None,
         preedit: None,
@@ -550,17 +551,17 @@ fn eyedropper_and_alt_sampling_show_a_pipette() {
     h.event(egui::Event::ModifiersChanged(Modifiers::ALT));
     assert_eq!(cursor(&mut h), egui::CursorIcon::None, "⌥ samples with a pipette");
     h.state_mut().run("prefs.set", json!({"values": {"cursors.other": "precise"}})).unwrap();
-    // Every platform reports the crosshair. Windows also hands the OS a black-and-white bitmap
-    // for it (`tool_cursor`, #1160), with `Crosshair` underneath as the fallback.
+    // Every platform reports the crosshair. The desktop builds also hand the OS a black-and-white
+    // bitmap for it (`tool_cursor`, #1160, #1343), with `Crosshair` underneath as the fallback.
     let precise = |h: &mut Harness<'static, PhotocraftApp>| {
         let icon = cursor(h);
         (icon, h.output().platform_output.cursor_image.is_some())
     };
-    let windows = cfg!(target_os = "windows");
-    assert_eq!(precise(&mut h), (egui::CursorIcon::Crosshair, windows), "Precise keeps the crosshair");
+    let desktop = cfg!(not(target_arch = "wasm32"));
+    assert_eq!(precise(&mut h), (egui::CursorIcon::Crosshair, desktop), "Precise keeps the crosshair");
     h.event(egui::Event::ModifiersChanged(Modifiers::NONE));
     h.state_mut().ui.tool = crate::state::Tool::Eyedropper;
-    assert_eq!(precise(&mut h), (egui::CursorIcon::Crosshair, windows));
+    assert_eq!(precise(&mut h), (egui::CursorIcon::Crosshair, desktop));
 }
 
 /// The Hand tool, and Space held over another tool, show an open hand while hovering and a fist
@@ -650,4 +651,59 @@ fn esc_ends_a_pen_path_and_keeps_it() {
     assert!(!path.subpaths[0].closed, "left open");
     assert_eq!(path.subpaths[0].knots.len(), 3);
     assert_eq!(h.state().ui.selected_path.as_deref(), Some("work"));
+}
+
+/// Esc with no active operation deselects (#2674), like ⌘D.
+#[test]
+fn escape_deselects_when_nothing_else_needs_cancelling() {
+    let mut h = harness();
+    h.state_mut().run("select.all", json!({})).unwrap();
+    h.run_steps(1);
+    assert!(h.state().session.active().unwrap().doc.selection.is_some());
+    h.key_press(Key::Escape);
+    h.run_steps(2);
+    assert!(h.state().session.active().unwrap().doc.selection.is_none(), "Esc deselects");
+    assert!(!h.state().ui.status_error, "no error: {}", h.state().ui.status);
+    // With nothing selected, Esc stays untouched (no history step, no error).
+    let steps = h.state().session.active().unwrap().history.entries().len();
+    h.key_press(Key::Escape);
+    h.run_steps(2);
+    assert_eq!(h.state().session.active().unwrap().history.entries().len(), steps, "no Deselect step");
+}
+
+/// The dialog owns Esc: it cancels the dialog and the selection stays.
+#[test]
+fn escape_with_a_dialog_open_cancels_the_dialog_not_the_selection() {
+    let mut h = harness();
+    h.state_mut().run("select.all", json!({})).unwrap();
+    open_dialog(&mut h);
+    h.key_press(Key::Escape);
+    h.run_steps(2);
+    assert!(h.state().ui.dialogs.is_empty(), "Esc cancelled the dialog");
+    assert!(h.state().session.active().unwrap().doc.selection.is_some(), "the selection stays");
+}
+
+/// The command palette owns Esc: it closes the palette and the selection stays.
+#[test]
+fn escape_with_the_palette_open_does_not_deselect() {
+    let mut h = harness();
+    h.state_mut().run("select.all", json!({})).unwrap();
+    h.state_mut().ui.palette_open = true;
+    h.run_steps(1);
+    h.key_press(Key::Escape);
+    h.run_steps(2);
+    assert!(h.state().session.active().unwrap().doc.selection.is_some(), "Esc belongs to the palette");
+}
+
+/// Targa Options owns Esc (it cancels the save), so the selection stays.
+#[test]
+fn escape_with_targa_options_open_does_not_deselect() {
+    let mut h = harness();
+    h.state_mut().run("select.all", json!({})).unwrap();
+    h.state_mut().save_as(Some("t.tga".into())).unwrap();
+    assert!(h.state().targa_options.is_some());
+    h.run_steps(1);
+    h.key_press(Key::Escape);
+    h.run_steps(2);
+    assert!(h.state().session.active().unwrap().doc.selection.is_some(), "Esc belongs to Targa Options");
 }

@@ -11,6 +11,25 @@
 # resource, string table or product UI was consulted or copied; add entries the same way.
 # Product and technology names (PhotoCraft, ArtCraft, OpenType, CMYK, Lab ...) stay in Latin
 # letters; the trailing "…" of dialog commands is kept.
+
+# Guide layout dialog
+	Rows	Baris
+	Number	Jumlah
+	Margin	Margin
+	Top:	Atas:
+	Left:	Kiri:
+	Bottom:	Bawah:
+	Right:	Kanan:
+	Target:	Target:
+	Selected Artboards	Artboard yang dipilih
+	Center Columns	Pusatkan kolom
+	Clear Existing Guides	Hapus panduan yang ada
+	Invalid guide layout	Tata letak panduan tidak valid
+	Leave empty for automatic size	Kosongkan untuk ukuran otomatis
+	5 Columns, 3 Rows	5 kolom, 3 baris
+	8 Columns	8 kolom
+	12 Columns	12 kolom
+
 	File	Berkas
 	Edit	Edit
 	Image	Gambar
@@ -31,8 +50,15 @@
 	New…	Baru…
 	Open…	Buka…
 	Open As…	Buka Sebagai…
+	Open EXR Parts…	Buka bagian EXR…
+	Add beauty precomp from the AOVs	Tambahkan prakomposisi beauty dari AOV
+	Both	Keduanya
+	Left	Kiri
+	Right	Kanan
 	Open Recent	Terakhir Dibuka
 	Clear Recent Files	Hapus Daftar Berkas Terakhir
+	Remove from Recent	Hapus dari Daftar Terakhir
+	Remove {name} from Recent	Hapus {name} dari Daftar Terakhir
 	Close	Tutup
 	Minimize	Minimalkan
 	Maximize	Maksimalkan
@@ -250,6 +276,7 @@
 	Layer via Cut	Layer via Potong
 	Layer From Background…	Layer dari Background…
 	Layer from Background…	Layer dari Background…
+	Background From Layer	Background dari Layer
 	New Shape Layer	Layer Bentuk Baru
 	New Type Layer	Layer Teks Baru
 	New Fill Layer	Layer Isian Baru
@@ -456,6 +483,12 @@
 	Color Range…	Rentang Warna…
 	Focus Area…	Area Fokus…
 	Select and Mask…	Seleksi dan Mask…
+# Select and Mask dialog labels
+	Smart Radius	Radius Cerdas
+	Shift Edge	Geser Tepi
+	Decontaminate	Dekontaminasi
+	Output	Keluaran
+	Refine Edge	Perbaiki Tepi
 	Modify	Ubah
 	Border…	Border…
 	Smooth…	Haluskan…
@@ -570,6 +603,10 @@
 	100%	100%
 	200%	200%
 	75%	75%
+	80%	80%
+	85%	85%
+	90%	90%
+	95%	95%
 	125%	125%
 	150%	150%
 	175%	175%
@@ -651,10 +688,15 @@
 	New Workspace…	Ruang Kerja Baru…
 	Delete Workspace…	Hapus Ruang Kerja…
 	Reset Workspace	Reset Ruang Kerja
+	Reset Tool	Reset Alat
+	Reset All Tools	Reset Semua Alat
+	Reset all tools to their default settings?	Reset semua alat ke pengaturan bawaannya?
 	Lock Workspace	Kunci Ruang Kerja
 	Theme	Tema
 	Pro Theme	Tema Pro
 	Pro Medium Gray Theme	Tema Pro Abu-abu Sedang
+	Pro Light Gray Theme	Tema Pro Abu-abu Terang
+	Pro Light Theme	Tema Pro Terang
 	Studio Theme	Tema Studio
 	Studio Light Theme	Tema Studio Terang
 	Adwaita Light Theme	Tema Adwaita Terang
@@ -662,6 +704,10 @@
 	Classic Theme	Tema Klasik
 	Solarized dark	Solarized gelap
 	Solarized Dark Theme	Tema Solarized Gelap
+	Breeze dark	Breeze gelap
+	Breeze Dark Theme	Tema Breeze Gelap
+	Breeze light	Breeze terang
+	Breeze Light Theme	Tema Breeze Terang
 	Next Theme	Tema Berikutnya
 	Actions	Action
 	Brush Settings	Pengaturan Kuas
@@ -711,6 +757,7 @@
 	Split Warp Horizontally	Bagi Warp Horizontal
 	Split Warp Vertically	Bagi Warp Vertikal
 	Statistics…	Statistik…
+	Refine Strokes	Goresan penyempurnaan
 @plural	{n} item|{n} items	{n} item
 	Auto	Otomatis
 	(print to the printer)	(cetak ke printer)
@@ -784,6 +831,9 @@
 	Bend:	Lengkung:
 	Bicubic	Bicubic
 	Bicubic (smooth gradients)	Bicubic (gradien halus)
+	Automatic	Otomatis
+	Bicubic Smoother (enlargement)	Bicubic lebih halus (pembesaran)
+	Bicubic Sharper (reduction)	Bicubic lebih tajam (pengecilan)
 	Bilinear	Bilinear
 	Black	Hitam
 	Black & White	Hitam & Putih
@@ -794,7 +844,6 @@
 	Blending Options	Opsi Blending
 	Blue	Biru
 	Blue, Red, Yellow	Biru, Merah, Kuning
-	Both	Keduanya
 	Both Axes	Kedua Sumbu
 	Bottom	Bawah
 	Brightness	Kecerahan
@@ -841,6 +890,7 @@
 	Click to zoom in  ·  {key}-click to zoom out  ·  drag right/left to zoom in/out	Klik untuk zoom in  ·  {key}-klik untuk zoom out  ·  seret kanan/kiri untuk zoom in/out
 	Click with the Note tool to add a note.	Klik dengan alat Catatan untuk menambah catatan.
 	Click: corner · Drag: smooth · Click first point: close · {key} finish · Esc cancel	Klik: sudut · Seret: halus · Klik titik pertama: tutup · {key} selesai · Esc batal
+	Click: corner · Drag: smooth · {alt}-drag: break handle · Click or drag first point: close · {key} finish · Esc cancel	Klik: sudut · Seret: halus · {alt}+seret: pisahkan pegangan · Klik atau seret titik pertama: tutup · {key} selesai · Esc batal
 	Clip to layer below	Klip ke layer di bawah
 	Clipped	Terklip
 	Close Style Options	Tutup Opsi Gaya
@@ -1107,7 +1157,6 @@
 	Leading	Leading
 	Leading (set to the font size × auto-leading when Auto)	Leading (diatur ke ukuran font × auto-leading saat Auto)
 	Leave as is (don't color manage)	Biarkan apa adanya (tanpa manajemen warna)
-	Left	Kiri
 	Left align text	Teks rata kiri
 	Length:	Panjang:
 	Level	Level
@@ -1279,6 +1328,7 @@
 	Record ● a sequence of edits, then play ▶ it on any document.	Rekam ● urutan pengeditan, lalu putar ▶ di dokumen apa saja.
 	Red	Merah
 	Redefine style by current selection	Definisikan ulang gaya dengan seleksi saat ini
+	Refine	Perhalus
 	Reflected Gradient	Gradien Pantulan
 	Registration Marks	Tanda Registrasi
 	Regular	Reguler
@@ -1317,7 +1367,6 @@
 	Restore All	Pulihkan Semua
 	Restore Defaults	Pulihkan Default
 	Restrictive (Web)	Restriktif (Web)
-	Right	Kanan
 	Right align text	Teks rata kanan
 	Rigid	Kaku
 	Rotate:	Putar:
@@ -1462,6 +1511,7 @@
 	White Balance: As Shot	White Balance: Sesuai Pemotretan
 	Whites	Putih
 	Width	Lebar
+	Slant	Kemiringan
 	Width:	Lebar:
 	Work Path	Work Path
 	Yellow	Kuning
@@ -1479,6 +1529,9 @@
 	↑↓ navigate   {key} run   esc close	↑↓ navigasi   {key} jalankan   esc tutup
 	Version {version}	Versi {version}
 	New Document	Dokumen Baru
+	New Document With Mask	Dokumen Baru dengan Mask
+	New Layer With Mask	Layer Baru dengan Mask
+	New Layer	Layer Baru
 	Preset Name	Nama Preset
 	No saved presets yet.	Belum ada preset tersimpan.
 	Error	Error
@@ -1497,6 +1550,7 @@
 	Blur Tool	Alat Blur
 	Bold	Tebal
 	Brush	Kuas
+	Block	Blok
 	Brush Pose	Pose Kuas
 	Brush Tip Shape	Bentuk Ujung Kuas
 	Brush Tool	Alat Kuas
@@ -1545,6 +1599,8 @@
 	Efficiency: 100%	Efisiensi: 100%
 	Ellipse Tool	Alat Ellipse
 	Elliptical Marquee Tool	Alat Elliptical Marquee
+	Single Row Marquee Tool	Alat Single Row Marquee
+	Single Column Marquee Tool	Alat Single Column Marquee
 	Emboss	Emboss
 	Eraser	Penghapus
 	Eraser Tool	Alat Penghapus
@@ -1567,6 +1623,8 @@
 	Highlights from:	Highlight dari:
 	History Brush Tool	Alat History Brush
 	Horizontal Type Tool	Alat Teks Horizontal
+	Horizontal Type Mask Tool	Alat Masker Teks Horizontal
+	Vertical Type Mask Tool	Alat Masker Teks Vertikal
 	Image Size:	Ukuran Gambar:
 	Inches	Inci
 	Indexed	Terindeks
@@ -1602,6 +1660,7 @@
 	Mobile	Seluler
 	Move Tool	Alat Pindah
 	Could not use the move tool because the layer is locked.	Tidak dapat menggunakan alat Pindahkan karena layer terkunci.
+	Could not complete the Free Transform command because the layer is locked.	Tidak dapat menyelesaikan perintah Transformasi Bebas karena layer terkunci.
 	Multiply	Multiply
 	My Brushes	Kuas Saya
 	Neutrals	Netral
@@ -1620,10 +1679,15 @@
 	Paints from the document's opening state	Melukis dari kondisi awal dokumen saat dibuka
 	Path Selection Tool	Alat Path Selection
 	Direct Selection Tool	Alat Direct Selection
+	Add Anchor Point Tool	Alat Tambah Titik Jangkar
+	Delete Anchor Point Tool	Alat Hapus Titik Jangkar
+	Click a segment to add an anchor point · {alt}-click an anchor to delete it	Klik segmen untuk menambah titik jangkar · {alt}-klik titik jangkar untuk menghapusnya
+	Click an anchor point to delete it · {alt}-click a segment to add one	Klik titik jangkar untuk menghapusnya · {alt}-klik segmen untuk menambah titik
 	Pattern Overlay	Overlay Pola
 	Pen Pressure	Tekanan Pena
 	Pen Tilt	Kemiringan Pena
 	Pen Tool	Alat Pen
+	Convert Point Tool	Alat Convert Point
 	Photo	Foto
 	PhotoCraft website	Situs web PhotoCraft
 	Picas	Pica
@@ -1639,6 +1703,8 @@
 	Postcard	Kartu Pos
 	Poster	Poster
 	Pro (Dark)	Pro (Gelap)
+	Pro (Light)	Pro (Terang)
+	Pro (Light Gray)	Pro (Abu-abu Terang)
 	Pro (Medium Gray)	Pro (Abu-abu Sedang)
 	Protect Texture	Lindungi Tekstur
 	Purple	Ungu
@@ -1708,6 +1774,7 @@
 	Scratch: {size}	Scratch: {size}
 	Untagged {mode}	{mode} Tanpa Tag
 	{w} px x {h} px ({ppi} ppi)	{w} px x {h} px ({ppi} ppi)
+	{w} {unit} x {h} {unit} ({ppi} ppi)	{w} {unit} x {h} {unit} ({ppi} ppi)
 	Resolution: {dpi} pixels/inch	Resolusi: {dpi} piksel/inci
 	Doc: {w} × {h} px	Dok: {w} × {h} px
 	Frame {current} / {total}	Frame {current} / {total}
@@ -1744,6 +1811,7 @@
 	Cache tile size	Ukuran tile cache
 	Camera Raw Defaults	Default Camera Raw
 	Canvas border	Border kanvas
+	Show canvas dots	Tampilkan titik kanvas
 	Canvas color	Warna kanvas
 	Canvas custom color	Warna kustom kanvas
 	Color picker	Pemilih warna
@@ -1831,6 +1899,8 @@
 	Preserve details	Pertahankan detail
 	Print resolution	Resolusi cetak
 	Pro	Pro
+	Pro light	Pro terang
+	Pro light gray	Pro abu-abu terang
 	Pro medium	Pro sedang
 	Pro photo	Pro photo
 	Quick export format	Format ekspor cepat
@@ -1858,6 +1928,7 @@
 	Show only crosshair while painting	Tampilkan crosshair saja saat melukis
 	Show slice numbers	Tampilkan nomor slice
 	Show tooltips	Tampilkan tooltip
+	Show highlight on rollover	Tampilkan sorotan saat kursor melintas
 	Show transformation values	Tampilkan nilai transformasi
 	Slice color	Warna slice
 	Smart guide color	Warna smart guide
@@ -1959,6 +2030,7 @@
 	Create Warped Text	Buat Teks Warp
 	Rasterize Smart Object	Rasterisasi Smart Object
 	Rasterize Fill Content	Rasterisasi Isi Konten
+	Rasterize Layer Style	Rasterisasi Gaya Layer
 	Unlock: picking a preset replaces these settings	Buka kunci: memilih preset akan mengganti pengaturan ini
 	Lock: keep these settings when picking another preset	Kunci: pertahankan pengaturan ini saat memilih preset lain
 	Diameter:	Diameter:
@@ -2029,7 +2101,9 @@
 	Developing {name}	Mengembangkan {name}
 	Cancelled {label}	{label} dibatalkan
 	Esc to cancel	Esc untuk batal
+	Opened {name}	Dibuka: {name}
 	Opening {name}	Membuka {name}
+	Saved {name}	Tersimpan: {name}
 	Saving {name}	Menyimpan {name}
 	A save to {name} is still running; try again when it finishes	Penyimpanan ke {name} masih berjalan; coba lagi setelah selesai
 	{label} is writing the file and can no longer be cancelled	{label} sedang menulis berkas dan tidak dapat dibatalkan lagi
@@ -2511,6 +2585,7 @@
 	Edit › Paste	Edit › Tempel
 	Use File › Open, or paste a copied image with {paste}.	Gunakan Berkas › Buka, atau tempel gambar yang disalin dengan {paste}.
 	Mixer Brush Tool	Alat Kuas Pencampur
+	Color Replacement Tool	Alat Penggantian Warna
 	Invalid {mode} profile	Profil {mode} tidak valid
 	Unnamed {mode} profile	Profil {mode} tanpa nama
 	Show bounding box when dragging layer	Tampilkan kotak pembatas saat menyeret layer
@@ -2577,6 +2652,9 @@ cameraRaw	Blending	Pembauran
 	Structure:	Struktur:
 	Content-Aware Move Tool	Alat Content-Aware Move
 	TIFF Options	Opsi TIFF
+	Targa Options	Opsi Targa
+	24 bits/pixel	24 Bit/Piksel
+	32 bits/pixel	32 Bit/Piksel
 	Including layers will increase file size.	Menyertakan layer akan memperbesar ukuran file.
 	Discard Layers and Save a Copy	Buang Layer dan Simpan Salinan
 	Don't show again	Jangan tampilkan lagi
@@ -2638,6 +2716,7 @@ cameraRaw	Blending	Pembauran
 
 # Shared screen eyedropper and text Color Picker (#1128).
 	Color Picker (Text Color)	Pemilih Warna (Warna Teks)
+	Color Picker ({name})	Pemilih Warna ({name})
 	Color Picker (Fill Color)	Pemilih Warna (Warna Isian)
 	Fill color	Warna isian
 	Color Picker (Stroke Color)	Pemilih Warna (Warna Stroke)
@@ -2664,6 +2743,21 @@ cameraRaw	Blending	Pembauran
 	Domed	Kubah
 	Domed (Inverted)	Kubah (Terbalik)
 	Diagonal (Descending)	Diagonal (Menurun)
+	Contour Editor	Editor Kontur
+	Anti-aliased	Dihaluskan
+	Corner	Sudut
+	Gloss Contour	Kontur Kilap
+	Contour	Kontur
+	Cone - Inverted	Kerucut - Terbalik
+	Cove - Deep	Teluk - Dalam
+	Cove - Shallow	Teluk - Dangkal
+	Gaussian	Gaussian
+	Half Round	Setengah Bulat
+	Ring	Cincin
+	Ring - Double	Cincin - Ganda
+	Rolling Slope - Descending	Lereng Bergelombang - Menurun
+	Rounded Steps	Tangga Bulat
+	Sawtooth 1	Gigi Gergaji 1
 
 	Red Eye Tool	Alat Mata Merah
 	Pupil Size	Ukuran pupil
@@ -2733,6 +2827,7 @@ fontWeight	Italic	Miring
 	Color to Alpha…	Warna ke Alpha…
 	Transparency Threshold	Ambang transparansi
 	Opacity Threshold	Ambang opasitas
+	PhotoCraft — Screen Color Picker	PhotoCraft — Pemilih Warna Layar
 
 	Rasterize svg groups deeper than	Rasterisasi grup SVG yang lebih dalam dari ini
 	0 turns this threshold off; SVG groups nested deeper than 100 levels are always rasterized.	0 menonaktifkan ambang ini; grup SVG yang bersarang lebih dari 100 tingkat selalu dirasterisasi.
@@ -2814,5 +2909,91 @@ fontWeight	Italic	Miring
 	Quick Selection found nothing there	Seleksi Cepat tidak menemukan apa pun di sana
 	Object Selection found nothing there — try a tighter rectangle	Seleksi Objek tidak menemukan apa pun di sana — coba persegi panjang yang lebih rapat
 	No subject found — try a rectangle around the object	Subjek tidak ditemukan — coba persegi panjang di sekitar objek
+	Click the first point or press {key} to close · {del} removes a point · Esc cancels	Klik titik pertama atau tekan {key} untuk menutup · {del} menghapus titik · Esc membatalkan
+	Click, then move along an edge · click to fasten a point · {alt}-click for a straight segment · double-click to close	Klik, lalu gerakkan di sepanjang tepi · klik untuk menancapkan titik · {alt}-klik untuk segmen lurus · klik dua kali untuk menutup
+	Follows only edges this close to the pointer ([ and ] change it)	Hanya mengikuti tepi sedekat ini dengan penunjuk ([ dan ] mengubahnya)
+	Higher values follow only edges that contrast sharply with their surroundings	Nilai lebih tinggi hanya mengikuti tepi yang kontras tajam dengan sekitarnya
+	How often fastening points are placed by themselves	Seberapa sering titik penambat ditempatkan sendiri
+	Appearance Settings…	Pengaturan Tampilan…
+	Add to favorites	Tambahkan ke favorit
+	Remove from favorites	Hapus dari favorit
+# File Info ▸ Camera Data (read-only EXIF fields; "Make" is the camera maker, not the verb).
+cameraData	Make	Merek
+cameraData	Model	Model
+cameraData	Date Taken	Tanggal Diambil
+cameraData	Exposure	Waktu Eksposur
+cameraData	F-Stop	Bukaan
+cameraData	ISO Speed	Sensitivitas ISO
+cameraData	Focal Length	Panjang Fokal
+cameraData	Focal Length (35 mm)	Panjang Fokal (35 mm)
+cameraData	Lens	Lensa
+# Shared panel docking
+	Activate Panel	Aktifkan Panel
+	Change Panel Group	Ubah Grup Panel
+	Change Panel Layout	Ubah Tata Letak Panel
+	Close Panel	Tutup Panel
+	Dock Panel	Tambatkan Panel
+	Float Panel	Panel Mengambang
+	Move Panel	Pindahkan Panel
+	Group with	Kelompokkan dengan
+	Panel menu	Menu panel
+	Resize panel window	Ubah ukuran jendela panel
+	Resize panels	Ubah ukuran panel
+	Use Classic Mode	Gunakan Mode Klasik
+	Auto Center Preview	Pusatkan Pratinjau Otomatis
+	Next Document	Dokumen Berikutnya
+	Previous Document	Dokumen Sebelumnya
 	W x H x Resolution	L x T x Resolusi
 	Front Image	Gambar Depan
+	Frame Tool	Alat Bingkai
+	Create a new rectangular frame	Buat bingkai persegi panjang baru
+	Create a new elliptical frame	Buat bingkai elips baru
+	Include in playback	Sertakan dalam pemutaran
+	Perspective Crop Tool	Alat Crop Perspektif
+	Show Grid	Tampilkan Grid
+	Drag a box or click four corners · drag the corners onto the edges of a skewed shape · {commit} commits · Esc cancels	Seret kotak atau klik empat sudut · seret sudut ke tepi bentuk yang miring · {commit} menerapkan · Esc membatalkan
+	Artboard Tool	Alat Artboard
+	Make Portrait	Jadikan Potret
+	Make Landscape	Jadikan Lanskap
+	Add New Artboard	Tambah Artboard Baru
+	Freeform Pen Tool	Alat Pen Bebas
+	Curvature Pen Tool	Alat Pen Kelengkungan
+	Curve Fit:	Penyesuaian Kurva:
+	Drag: draw freehand · Release on the start point: close	Seret: gambar bebas · Lepas di titik awal: tutup
+	Click: smooth point · Double-click: corner · Drag a point: move · Click first point: close · {key} finish	Klik: titik halus · Klik ganda: sudut · Seret titik: pindahkan · Klik titik pertama: tutup · {key} selesai
+	New Crop Preset…	Preset Pangkas Baru…
+	Delete Crop Preset…	Hapus Preset Pangkas…
+	Select the crop presets to delete:	Pilih preset pangkas yang akan dihapus:
+	Select the crop presets to delete	Pilih preset pangkas yang akan dihapus
+	Enter a name for the crop preset	Masukkan nama untuk preset pangkas
+	There is no crop size or ratio to save	Tidak ada ukuran atau rasio pangkas untuk disimpan
+	Scale:	Skala:
+	Snap to Origin	Jepret ke Titik Asal
+	Search settings…	Cari pengaturan…
+	No matching settings	Tidak ada pengaturan yang cocok
+	Loading fonts…	Memuat font…
+# Select and Mask view modes (#1754)
+	Onion Skin	Kulit Bawang
+	Marching Ants	Semut Berbaris
+	On Black	Di Atas Hitam
+	On White	Di Atas Putih
+	On Layers	Di Atas Lapisan
+	Show Edge	Tampilkan Tepi
+	Show Original	Tampilkan Asli
+	F cycles the views; hold X to see the image	F berganti tampilan; tahan X untuk melihat gambar
+# Select and Mask Refine Edge Brush (#2972)
+	Refine Edge Brush (R)	Kuas Perhalus Tepi (R)
+	Expand Detection Area	Perluas Area Deteksi
+	Restore Original Edge	Pulihkan Tepi Asli
+	Paint over hair or fur on the image; Alt paints the other mode	Lukis di atas rambut atau bulu pada gambar; Alt melukis dalam mode lainnya
+	Clear Brush Strokes	Hapus Goresan Kuas
+	Show rulers	Tampilkan Penggaris
+
+# Color Sampler (added with the i18n coverage repair)
+	Click to place · Alt-click or drag off-canvas to remove	Klik untuk menempatkan · Alt-klik atau seret ke luar kanvas untuk menghapus
+	No document open	Tidak ada dokumen yang terbuka
+	{n} of {max} sample points	{n} dari {max} titik sampel
+# Print dialog (#2697)
+	Emulsion Down	Emulsi di Bawah
+	Functions	Fungsi
+	Print Resolution:	Resolusi Cetak:

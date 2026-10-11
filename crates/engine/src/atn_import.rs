@@ -263,6 +263,7 @@ fn build(file: &ActionFile, list: &[Action]) -> Result<(Vec<Built>, Vec<String>)
             color: color_from_index(item.color_index).to_string(),
             step_enabled: enabled,
             step_dialog: dialogs,
+            disabled: Default::default(),
         };
         names.push(Action::new(name, Vec::new()));
         built.push(Built { shortcut: shortcut_of(item.function_key, item.shift, item.command), action });

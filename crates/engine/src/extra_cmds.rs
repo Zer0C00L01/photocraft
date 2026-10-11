@@ -68,7 +68,7 @@ pub(crate) fn style_targets(s: &Session, p: &Value, fits: impl Fn(&Layer) -> boo
 }
 
 /// A key that makes the sub-commands of one command share a single history step.
-fn step_key(s: &Session, what: &str) -> String {
+pub(crate) fn step_key(s: &Session, what: &str) -> String {
     format!("{what}#{}", s.active().map_or(0, |d| d.revision))
 }
 
@@ -333,11 +333,21 @@ fn clouds(s: &mut Session, p: &Value, difference: bool) -> Result<Value> {
 
 // ---------- transform presets ----------
 
-fn transform_preset(s: &mut Session, kind: &str) -> Result<Value> {
+/// The presets' params: like Free Transform, they follow the Channels and Layers panel target.
+const TRANSFORM_TARGET: &str =
+    r#"{"target":"pixels"|"mask"|"quickMask"|{"channel":i}=Channels panel target (an unlinked mask, an alpha channel or the Quick Mask turns alone)}"#;
+
+fn transform_preset(s: &mut Session, p: &Value, kind: &str) -> Result<Value> {
     let d = s.active().ok_or(EngineError::NoDocument)?;
-    let id = d.active_layer.ok_or(EngineError::Other("no active layer".into()))?;
-    let l = d.doc.layer(id).ok_or(EngineError::NoLayer(id))?;
-    let b = crate::transform_cmds::transform_bounds(&d.doc, l);
+    // A targeted alpha channel, the Quick Mask or an unlinked layer mask turns by itself (#2835).
+    let (b, mut params) = match crate::transform_cmds::lone_target(&d.doc, d.active_layer, p)? {
+        Some(surf) => (crate::transform_cmds::target_bounds(&d.doc, surf), json!({"target": p.get("target")})),
+        None => {
+            let id = d.active_layer.ok_or(EngineError::Other("no active layer".into()))?;
+            let l = d.doc.layer(id).ok_or(EngineError::NoLayer(id))?;
+            (crate::transform_cmds::transform_bounds(&d.doc, l), json!({"layer": id.0}))
+        }
+    };
     if b.is_empty() {
         return Err(EngineError::Other("nothing to transform".into()));
     }
@@ -351,7 +361,9 @@ fn transform_preset(s: &mut Session, kind: &str) -> Result<Value> {
         "flipHorizontal" => [-1.0, 0.0, 0.0, 1.0, sx, 0.0],
         _ => [1.0, 0.0, 0.0, -1.0, 0.0, sy],
     };
-    s.execute("edit.transform", json!({"layer": id.0, "matrix": m, "interpolation": "nearest"}))
+    params["matrix"] = json!(m);
+    params["interpolation"] = json!("nearest");
+    s.execute("edit.transform", params)
 }
 
 // ---------- selection / clipboard ----------
@@ -390,6 +402,10 @@ fn paste_into(s: &mut Session, p: &Value, outside: bool) -> Result<Value> {
     if let Some(c) = p.get("center") {
         params["center"] = c.clone();
     }
+    // A targeted colour channel (#2307): the paste goes into it, only where `limit` allows.
+    if let Some(k) = crate::channel_clip::paste_color_target(s, p) {
+        return crate::channel_clip::paste(s, &params, k, false, Some(&limit), label);
+    }
     if crate::channel_cmds::target_of(p) != crate::channel_cmds::Target::Pixels {
         // A targeted mask or channel (#1035): the paste goes into it, only where `limit` allows.
         params["target"] = p.get("target").cloned().unwrap_or_default();
@@ -398,6 +414,7 @@ fn paste_into(s: &mut Session, p: &Value, outside: bool) -> Result<Value> {
     let key = step_key(s, "pasteInto");
     params["coalesce"] = json!(key);
     params["target"] = json!("pixels");
+    let before = s.active().ok_or(EngineError::NoDocument)?.doc.clone();
     let r = s.execute("edit.paste", params)?;
     let id = layer_param(s, &Value::Null)?;
     s.execute("layer.layerMask.revealAll", json!({"layer": id.0, "coalesce": key}))?;
@@ -409,6 +426,8 @@ fn paste_into(s: &mut Session, p: &Value, outside: bool) -> Result<Value> {
     });
     s.coalesce_request = None;
     r2?;
+    // Only where the masked paste draws needs recompositing (#2901).
+    crate::layer_multi_cmds::note_insert(s, &before);
     Ok(r)
 }
 
@@ -613,7 +632,7 @@ fn content_pixels(doc: &Document, l: &Layer) -> photocraft_raster::Surface {
     s
 }
 
-fn kind_of(s: &Session, id: LayerId) -> Option<&'static str> {
+pub(crate) fn kind_of(s: &Session, id: LayerId) -> Option<&'static str> {
     let d = s.active()?;
     Some(match &d.doc.layer(id)?.content {
         LayerContent::Text(_) => "type",
@@ -624,8 +643,19 @@ fn kind_of(s: &Session, id: LayerId) -> Option<&'static str> {
     })
 }
 
-/// Rasterize one layer; `only` restricts it to one kind. Returns false when there was nothing to do.
-fn rasterize_one(s: &mut Session, id: LayerId, only: Option<&str>, key: &str) -> Result<bool> {
+/// Rasterize one layer; `only` restricts it to one kind. Without `only` (Rasterize › Layer / All
+/// Layers: "all vector data") a vector mask becomes a pixel mask too; layer effects stay live, as
+/// in Photoshop (Rasterize › Layer Style bakes them). Returns false when there was nothing to do.
+pub(crate) fn rasterize_one(s: &mut Session, id: LayerId, only: Option<&str>, key: &str) -> Result<bool> {
+    let vector_mask = only.is_none() && s.active().and_then(|d| d.doc.layer(id)).is_some_and(|l| l.vector_mask.is_some());
+    let content = rasterize_content(s, id, only, key)?;
+    if vector_mask {
+        s.execute("layer.rasterize.vectorMask", json!({"layer": id.0, "coalesce": key}))?;
+    }
+    Ok(content || vector_mask)
+}
+
+fn rasterize_content(s: &mut Session, id: LayerId, only: Option<&str>, key: &str) -> Result<bool> {
     let Some(kind) = kind_of(s, id).filter(|k| only.is_none_or(|o| o == *k)) else { return Ok(false) };
     match kind {
         "type" => {
@@ -677,7 +707,7 @@ pub(crate) fn rasterize(s: &mut Session, p: &Value, only: Option<&'static str>) 
     Ok(json!({"layer": active.unwrap_or(first), "layers": done}))
 }
 
-fn rasterize_all(s: &mut Session) -> Result<Value> {
+pub(crate) fn rasterize_all(s: &mut Session) -> Result<Value> {
     let ids: Vec<LayerId> = s.active().map(|d| d.doc.walk().into_iter().map(|(_, _, l)| l.id).collect()).unwrap_or_default();
     let key = step_key(s, "rasterizeAll");
     let mut n = 0;
@@ -708,14 +738,29 @@ pub fn specs() -> Vec<CommandSpec> {
             has_pixels,
             stroke
         ),
-        spec!("edit.transform.rotate180", "Rotate 180°", &["Edit", "Transform"], None, "{}", has_layer, |s, _| transform_preset(s, "rotate180")),
-        spec!("edit.transform.rotate90Cw", "Rotate 90° Clockwise", &["Edit", "Transform"], None, "{}", has_layer, |s, _| transform_preset(s, "rotate90Cw")),
-        spec!("edit.transform.rotate90Ccw", "Rotate 90° Counter Clockwise", &["Edit", "Transform"], None, "{}", has_layer, |s, _| transform_preset(
+        spec!("edit.transform.rotate180", "Rotate 180°", &["Edit", "Transform"], None, TRANSFORM_TARGET, has_layer, |s, p| transform_preset(
             s,
-            "rotate90Ccw"
+            p,
+            "rotate180"
         )),
-        spec!("edit.transform.flipHorizontal", "Flip Horizontal", &["Edit", "Transform"], None, "{}", has_layer, |s, _| transform_preset(s, "flipHorizontal")),
-        spec!("edit.transform.flipVertical", "Flip Vertical", &["Edit", "Transform"], None, "{}", has_layer, |s, _| transform_preset(s, "flipVertical")),
+        spec!("edit.transform.rotate90Cw", "Rotate 90° Clockwise", &["Edit", "Transform"], None, TRANSFORM_TARGET, has_layer, |s, p| transform_preset(
+            s,
+            p,
+            "rotate90Cw"
+        )),
+        spec!("edit.transform.rotate90Ccw", "Rotate 90° Counter Clockwise", &["Edit", "Transform"], None, TRANSFORM_TARGET, has_layer, |s, p| {
+            transform_preset(s, p, "rotate90Ccw")
+        }),
+        spec!("edit.transform.flipHorizontal", "Flip Horizontal", &["Edit", "Transform"], None, TRANSFORM_TARGET, has_layer, |s, p| transform_preset(
+            s,
+            p,
+            "flipHorizontal"
+        )),
+        spec!("edit.transform.flipVertical", "Flip Vertical", &["Edit", "Transform"], None, TRANSFORM_TARGET, has_layer, |s, p| transform_preset(
+            s,
+            p,
+            "flipVertical"
+        )),
         spec!(
             "edit.pasteSpecial.pasteInto",
             "Paste Into",

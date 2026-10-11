@@ -155,6 +155,50 @@ fn every_adjustment_layer_edits_through_properties() {
     }
 }
 
+/// #3264: wheel browsing previews without recording one edit per selected LUT.
+#[test]
+fn color_lookup_picker_cycles_luts_with_the_mouse_wheel() {
+    let mut h = app_harness("colorLookup", "rgb", 8);
+    let (_, before) = layer(&h);
+    let Adjustment::ColorLookup { name: before_name, .. } = before else { panic!("Color Lookup layer") };
+    let label = label_rect(&h, "3D LUT File").expect("Color Lookup file label");
+    let at = h
+        .query_all_by_role(egui::accesskit::Role::ComboBox)
+        .min_by(|a, b| a.rect().center().distance(label.center()).total_cmp(&b.rect().center().distance(label.center())))
+        .expect("Color Lookup picker")
+        .rect()
+        .center();
+    let steps = h.state().session.active().unwrap().history.past_len();
+    h.hover_at(at);
+    h.run_steps(1);
+    h.query_all_by_role(egui::accesskit::Role::ComboBox)
+        .min_by(|a, b| a.rect().center().distance(label.center()).total_cmp(&b.rect().center().distance(label.center())))
+        .expect("Color Lookup picker")
+        .click();
+    h.run_steps(1);
+    h.key_press(egui::Key::ArrowDown);
+    h.run_steps(1);
+    assert_eq!(h.state().session.active().unwrap().history.past_len(), steps, "arrow navigation previews");
+    assert!(h.state().live_adjust.is_some(), "arrow navigation selects a preview LUT");
+    for _ in 0..3 {
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: vec2(0.0, -1.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: Default::default(),
+        });
+        h.run_steps(1);
+    }
+    assert_eq!(h.state().session.active().unwrap().history.past_len(), steps, "cycling remains a preview");
+    assert!(h.state().live_adjust.is_some(), "the selected LUT is previewed");
+    h.run_steps(4);
+    let (_, after) = layer(&h);
+    let Adjustment::ColorLookup { name: after_name, .. } = after else { panic!("Color Lookup layer") };
+    assert_ne!(after_name, before_name, "wheel browsing selects a different LUT");
+    assert_eq!(h.state().session.active().unwrap().history.past_len(), steps + 1, "one wheel gesture makes one adjustment edit");
+    assert!(h.state().live_adjust.is_none(), "the completed wheel gesture is committed");
+}
+
 fn curve_of(a: &Adjustment) -> Vec<[f32; 2]> {
     match a {
         Adjustment::Curves { master, .. } => master.iter().map(|p| [(p.input * 255.0).round(), (p.output * 255.0).round()]).collect(),
