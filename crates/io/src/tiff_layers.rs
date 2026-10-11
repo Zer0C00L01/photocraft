@@ -612,6 +612,105 @@ fn ne_f32(b: &[u8]) -> Option<f32> {
     Some(f32::from_ne_bytes(arr))
 }
 
+/// Mattes straight U8 RGBA over white and stores the document's single grayscale channel in the
+/// alpha slot, so the TIFF encoder can write RGB + one extra sample without a second full-canvas
+/// buffer. `None` leaves `img` untouched (the caller uses [`stamp_flat_channels`]).
+///
+/// The stored bytes match [`stamp_flat_channels`] for this one case: opaque pixels keep their
+/// colour, a clear pixel becomes white, a spot is inverted (0 = solid ink), and an alpha channel
+/// is not.
+pub(crate) fn fuse_u8_rgba_one_extra(doc: &Document, img: &mut Image) -> Option<Vec<String>> {
+    if doc.quick_mask.is_some() || doc.channels.len() != 1 {
+        return None;
+    }
+    let channel = doc.channels.first()?;
+    if img.sample_type() != CSample::U8 || img.layout() != ChannelLayout::Rgba {
+        return None;
+    }
+    let (w, h) = img.dimensions();
+    if w != doc.size.width || h != doc.size.height || w == 0 || h == 0 {
+        return None;
+    }
+    let gray8 = PixelFormat::new(ColorMode::Grayscale, SampleType::U8, false);
+    if channel.surface.format() != gray8 || !img.meta.extra_samples.is_empty() || img.meta.interleaved_extras != 0 {
+        return None;
+    }
+    let width = w as usize;
+    let pixels = width.checked_mul(h as usize)?;
+    if img.data().len() != pixels.saturating_mul(4) {
+        return None;
+    }
+    let invert = channel.spot.is_some();
+    let strip = 64i32;
+    let mut y = 0i32;
+    let height = h as i32;
+    let canvas_w = w as i32;
+    while y < height {
+        let y1 = y.saturating_add(strip).min(height);
+        let rows = (y1 - y) as usize;
+        let mut plane = channel.surface.to_interleaved(Rect::new(0, y, canvas_w, y1));
+        if plane.len() != rows.saturating_mul(width) {
+            if y == 0 {
+                return None;
+            }
+            plane.resize(rows.saturating_mul(width), 0);
+        }
+        if invert {
+            for b in &mut plane {
+                *b = 255u8.wrapping_sub(*b);
+            }
+        }
+        let data = img.data_mut();
+        for row in 0..rows {
+            for x in 0..width {
+                let pix = ((y as usize).saturating_add(row).saturating_mul(width).saturating_add(x)).saturating_mul(4);
+                let Some(px) = data.get_mut(pix..pix.saturating_add(4)) else {
+                    continue;
+                };
+                let extra = plane.get(row.saturating_mul(width).saturating_add(x)).copied().unwrap_or(if invert { 255 } else { 0 });
+                matte_rgba_slot(px, extra);
+            }
+        }
+        y = y1;
+    }
+    let names = [channel.name.as_str()];
+    let picked = [channel];
+    let color_channels = img.layout().color_channels();
+    let first_id = u32::try_from(color_channels).unwrap_or(u32::MAX);
+    let mut warnings = Vec::new();
+    match channel_resources(img.meta.photoshop_resources.as_deref(), &names, &picked, None, first_id) {
+        Ok(bytes) => img.meta.photoshop_resources = Some(bytes),
+        Err(e) => warnings.push(format!("spot channel options were not written to the TIFF: {e}")),
+    }
+    img.meta.extra_samples = vec![codecs::ExtraSample { kind: 0, data: Vec::new() }];
+    img.meta.interleaved_extras = 1;
+    Some(warnings)
+}
+
+/// One U8 RGBA pixel of [`matte_and_drop_alpha`], then the extra sample in the alpha slot.
+fn matte_rgba_slot(px: &mut [u8], extra: u8) {
+    let Some(alpha) = px.get(3).copied() else {
+        return;
+    };
+    if alpha == 0 {
+        if let Some(rgb) = px.get_mut(..3) {
+            rgb.fill(255);
+        }
+    } else if alpha != 255 {
+        let af = f32::from(alpha) / 255.0;
+        for c in 0..3 {
+            let Some(slot) = px.get_mut(c) else {
+                return;
+            };
+            let m = crate::pixels::matte(f32::from(*slot) / 255.0, af, 1.0);
+            *slot = (m.clamp(0.0, 1.0) * 255.0).round() as u8;
+        }
+    }
+    if let Some(slot) = px.get_mut(3) {
+        *slot = extra;
+    }
+}
+
 /// Writes alpha and spot channels (and a Quick Mask) into a flat TIFF: extra samples in the
 /// IFD, plus Photoshop resources for the name, ink colour and solidity. At most
 /// [`codecs::MAX_EXTRA_SAMPLES`] are kept. A TIFF with no extra channels is left unchanged.
@@ -788,4 +887,76 @@ fn mask_from_plane(data: &[u8], w: u32, h: u32, n: usize, from: CSample, depth: 
     s.write_interleaved(rect, &bytes);
     s.prune();
     Ok(s)
+}
+
+#[cfg(test)]
+mod fuse_tests {
+    use super::{fuse_u8_rgba_one_extra, stamp_flat_channels};
+    use photocraft_codecs::{self as codecs, ChannelLayout, Format};
+    use photocraft_color::{Color, ColorMode, PixelFormat, SampleType};
+    use photocraft_doc::{AlphaChannel, Document, Layer, LayerContent};
+    use photocraft_geom::{Rect, Size};
+    use photocraft_raster::Surface;
+
+    #[test]
+    fn fused_u8_spot_tiff_matches_the_separate_plane_file() {
+        let (w, h) = (40u32, 70u32);
+        let mut doc = Document::new("fuse", Size::new(w, h), ColorMode::Rgb, SampleType::U8);
+        let fmt = doc.pixel_format();
+        let n = (w * h) as usize;
+        let mut px = vec![0.0f32; n * fmt.channels()];
+        let ch = fmt.channels();
+        for y in 0..h as usize {
+            for x in 0..w as usize {
+                let a = if (10..30).contains(&x) && (20..50).contains(&y) {
+                    if y == 20 || x == 10 { 128.0 / 255.0 } else { 1.0 }
+                } else if x == 0 && y == 0 {
+                    10.0 / 255.0
+                } else {
+                    0.0
+                };
+                let o = (y * w as usize + x) * ch;
+                px[o] = 0.2;
+                px[o + 1] = 0.4;
+                px[o + 2] = 0.6;
+                px[o + 3] = a;
+            }
+        }
+        let mut art = Surface::new(fmt);
+        art.write_region(Rect::new(0, 0, w as i32, h as i32), &px);
+        doc.layers.push(Layer::new("Art", LayerContent::Raster(art)));
+        let mut ink = vec![0.0f32; n];
+        for (i, v) in ink.iter_mut().enumerate() {
+            *v = ((i * 3) % 17) as f32 / 16.0;
+        }
+        let mut spot_s = Surface::new(PixelFormat::GRAY8);
+        spot_s.write_region(Rect::new(0, 0, w as i32, h as i32), &ink);
+        spot_s.prune();
+        let mut channel = AlphaChannel::new("Spot Color 1", spot_s);
+        channel.spot = Some((Color::rgb(1.0, 0.0, 0.0), 0.6));
+        doc.channels.push(channel);
+
+        let mut warnings = Vec::new();
+        let base = crate::flat::document_to_image(&doc, &mut warnings).unwrap();
+        assert_eq!(base.layout(), ChannelLayout::Rgba);
+        let mut classic = base.clone();
+        let mut fused = base.clone();
+        let classic_warnings = stamp_flat_channels(&doc, &mut classic);
+        let fused_warnings = fuse_u8_rgba_one_extra(&doc, &mut fused).expect("one U8 spot fuses");
+        assert_eq!(classic_warnings, fused_warnings);
+        let opts = codecs::EncodeOptions::default();
+        let separate = codecs::encode(&classic, Format::Tiff, &opts).unwrap();
+        let inplace = codecs::encode(&fused, Format::Tiff, &opts).unwrap();
+        assert_eq!(separate, inplace);
+
+        doc.channels.push(AlphaChannel::new("Alpha 1", Surface::new(PixelFormat::GRAY8)));
+        let before = fused.data().to_vec();
+        // `fused` was already rewritten; start again from the straight composite.
+        let mut untouched = base;
+        let straight = untouched.data().to_vec();
+        assert!(fuse_u8_rgba_one_extra(&doc, &mut untouched).is_none());
+        assert_eq!(untouched.data(), straight.as_slice());
+        assert!(untouched.meta.extra_samples.is_empty());
+        assert_ne!(before, straight);
+    }
 }

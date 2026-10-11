@@ -1310,6 +1310,53 @@ fn bytes_as_f32(b: &[u8]) -> Vec<f32> {
         .collect()
 }
 
+/// `data` already holds colour samples plus [`Metadata::interleaved_extras`] (the layout's alpha
+/// slot is those extras, not an alpha channel).
+fn interleaved_layout_ok(img: &Image) -> Result<(), io::Error> {
+    let n = img.meta.interleaved_extras;
+    if n == 0 || n > crate::MAX_EXTRA_SAMPLES {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "unsupported interleaved extra samples"));
+    }
+    if n != img.meta.extra_samples.len() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "interleaved extras do not match the extra-sample list"));
+    }
+    if img.sample_type() != SampleType::U8 {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "interleaved extras require 8-bit samples"));
+    }
+    let color = img.layout().color_channels();
+    let Some(total) = color.checked_add(n) else {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "too many samples"));
+    };
+    if img.layout().channels() != total || !img.layout().has_alpha() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "image buffer does not hold the interleaved extras"));
+    }
+    let (w, h) = img.dimensions();
+    let Some(pixels) = (w as usize).checked_mul(h as usize) else {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "image size overflows"));
+    };
+    let Some(bytes) = pixels.checked_mul(total) else {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "image size overflows"));
+    };
+    if img.data().len() != bytes {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "image buffer is shorter than its dimensions"));
+    }
+    Ok(())
+}
+
+fn write_already_interleaved<K: TiffKind>(enc: &mut TiffEncoder<&mut Cursor<Vec<u8>>, K>, img: &Image, tags: &TagSet<'_>) -> tiff::TiffResult<()> {
+    use ChannelLayout as L;
+    interleaved_layout_ok(img)?;
+    let (w, h) = img.dimensions();
+    let n = img.meta.interleaved_extras;
+    let bytes = img.data();
+    match img.layout() {
+        L::GrayA => write_extras!(n, enc, w, h, bytes, tags, u8, 1, 8, 1),
+        L::Rgba => write_extras!(n, enc, w, h, bytes, tags, u8, 2, 8, 3),
+        L::CmykA => write_extras!(n, enc, w, h, bytes, tags, u8, 5, 8, 4),
+        _ => Err(io::Error::new(io::ErrorKind::InvalidInput, "unsupported interleaved extra samples").into()),
+    }
+}
+
 /// Interleaves colour (and alpha) samples with [`Metadata::extra_samples`].
 fn interleave_extras(img: &Image) -> Result<Vec<u8>, String> {
     let (w, h) = img.dimensions();
@@ -1463,6 +1510,9 @@ where
 fn write_image<K: TiffKind>(enc: &mut TiffEncoder<&mut Cursor<Vec<u8>>, K>, img: &Image, tags: &TagSet<'_>) -> tiff::TiffResult<()> {
     use ChannelLayout as L;
     use SampleType as S;
+    if img.meta.interleaved_extras > 0 {
+        return write_already_interleaved::<K>(enc, img, tags);
+    }
     if !img.meta.extra_samples.is_empty() {
         return write_with_extras::<K>(enc, img, tags);
     }
@@ -1503,7 +1553,9 @@ fn estimated_size(img: &Image, tags: &TagSet<'_>) -> u64 {
     let text = tags.text.iter().map(|(_, s)| s.len() as u64).sum::<u64>();
     // Strip tables: one offset and one count per strip of about 1 MB.
     let tables = (img.data().len() as u64 / (1 << 20) + 1) * 16;
-    let extras: u64 = img.meta.extra_samples.iter().map(|e| e.data.len() as u64).sum();
+    // Interleaved extras already live in `data`; adding empty side planes would under-count, and
+    // adding a duplicate of `data` would force BigTIFF on a file the classic path still fits.
+    let extras: u64 = if img.meta.interleaved_extras > 0 { 0 } else { img.meta.extra_samples.iter().map(|e| e.data.len() as u64).sum() };
     (img.data().len() as u64).saturating_add(extras).saturating_add(payloads).saturating_add(text).saturating_add(tables).saturating_add(1 << 20)
 }
 
@@ -1570,11 +1622,21 @@ fn encode_ready(img: &Image, opts: &EncodeOptions) -> Result<Vec<u8>, CodecError
         return Err(CodecError::encode(F, format!("TIFF stores at most {} extra samples", crate::MAX_EXTRA_SAMPLES)));
     }
     let mut kinds = Vec::with_capacity(img.meta.extra_samples.len().saturating_add(1));
-    if img.layout().has_alpha() {
-        kinds.push(2);
-    }
-    for e in &img.meta.extra_samples {
-        kinds.push(e.kind);
+    if img.meta.interleaved_extras > 0 {
+        if img.meta.interleaved_extras != img.meta.extra_samples.len() {
+            return Err(CodecError::encode(F, "interleaved extras do not match the extra-sample list"));
+        }
+        // The alpha slot already holds the extras, so it is not a second unassociated alpha.
+        for e in &img.meta.extra_samples {
+            kinds.push(e.kind);
+        }
+    } else {
+        if img.layout().has_alpha() {
+            kinds.push(2);
+        }
+        for e in &img.meta.extra_samples {
+            kinds.push(e.kind);
+        }
     }
     let tags = TagSet {
         icc: if opts.embed_icc { img.icc.as_deref() } else { None },

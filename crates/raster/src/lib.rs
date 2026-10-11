@@ -642,6 +642,47 @@ impl Surface {
         }
     }
 
+    /// [`Surface::write_interleaved`] that leaves a missing tile missing when every sample written
+    /// into it is the default pixel. A later [`Surface::prune`] would drop that tile, so the two
+    /// sequences agree, without first allocating a full-canvas tile grid.
+    pub fn write_interleaved_sparse(&mut self, r: Rect, bytes: &[u8]) -> Result<(), AllocationError> {
+        let bpp = self.format.bytes_per_pixel();
+        let w = r.width() as usize;
+        let height = r.height() as usize;
+        let expect = w.checked_mul(height).and_then(|n| n.checked_mul(bpp)).ok_or(AllocationError::SizeOverflow)?;
+        if bytes.len() != expect {
+            return Err(AllocationError::SizeOverflow);
+        }
+        let dp = self.default_pixel.clone();
+        for tc in r.tiles() {
+            let tr = tc.rect().intersect(&r);
+            let span = tr.width() as usize * bpp;
+            let untouched = !self.tiles.contains_key(&tc);
+            if untouched && bpp > 0 && span > 0 {
+                let all_default = (tr.y0..tr.y1).all(|y| {
+                    let src = (((y - r.y0) as usize) * w + (tr.x0 - r.x0) as usize) * bpp;
+                    bytes.get(src..src.saturating_add(span)).is_some_and(|row| row.chunks_exact(bpp).all(|px| px == dp.as_ref()))
+                });
+                if all_default {
+                    continue;
+                }
+            }
+            let t = self.try_tile_mut(tc)?;
+            for y in tr.y0..tr.y1 {
+                let src = (((y - r.y0) as usize) * w + (tr.x0 - r.x0) as usize) * bpp;
+                let dst = (((y - tc.ty * TILE_SIZE) as usize) * TILE_SIZE as usize + (tr.x0 - tc.tx * TILE_SIZE) as usize) * bpp;
+                let Some(src_bytes) = bytes.get(src..src.saturating_add(span)) else {
+                    return Err(AllocationError::SizeOverflow);
+                };
+                let Some(dst_bytes) = t.data.get_mut(dst..dst.saturating_add(span)) else {
+                    return Err(AllocationError::SizeOverflow);
+                };
+                dst_bytes.copy_from_slice(src_bytes);
+            }
+        }
+        Ok(())
+    }
+
     /// Read `r` as interleaved encoded bytes in the surface's format.
     pub fn to_interleaved(&self, r: Rect) -> Vec<u8> {
         let bpp = self.format.bytes_per_pixel();
@@ -915,6 +956,38 @@ mod tests {
         let huge = Rect::new(i32::MIN, i32::MIN, i32::MAX, i32::MAX);
         assert_eq!(surface.try_read_region(huge), Err(AllocationError::SizeOverflow));
         assert_eq!(surface.try_to_interleaved(huge), Err(AllocationError::SizeOverflow));
+    }
+
+    #[test]
+    fn sparse_interleaved_write_matches_write_then_prune() {
+        let fmt = PixelFormat::RGBA8;
+        let r = Rect::new(0, 0, 600, 600);
+        let bpp = fmt.bytes_per_pixel();
+        let mut bytes = vec![0u8; 600 * 600 * bpp];
+        let put = |buf: &mut [u8], x: usize, y: usize, a: u8| {
+            let o = (y * 600 + x) * bpp;
+            buf[o] = 10;
+            buf[o + 1] = 20;
+            buf[o + 2] = 30;
+            buf[o + 3] = a;
+        };
+        put(&mut bytes, 0, 0, 255);
+        put(&mut bytes, 255, 255, 128);
+        put(&mut bytes, 256, 256, 255);
+        put(&mut bytes, 599, 10, 1);
+        let mut full = Surface::new(fmt);
+        full.write_interleaved(r, &bytes);
+        full.prune();
+        let mut sparse = Surface::new(fmt);
+        sparse.write_interleaved_sparse(r, &bytes).unwrap();
+        assert!(sparse.tile_count() < r.tiles().count());
+        assert_eq!(sparse.tile_count(), full.tile_count());
+        assert_eq!(sparse.to_interleaved(r), full.to_interleaved(r));
+        // A second strip of defaults must not drop pixels an earlier strip stored in the same tile.
+        let mut again = Surface::new(fmt);
+        again.write_interleaved_sparse(Rect::new(0, 0, 600, 100), &bytes[..100 * 600 * bpp]).unwrap();
+        again.write_interleaved_sparse(Rect::new(0, 100, 600, 600), &bytes[100 * 600 * bpp..]).unwrap();
+        assert_eq!(again.to_interleaved(r), full.to_interleaved(r));
     }
 
     #[test]
