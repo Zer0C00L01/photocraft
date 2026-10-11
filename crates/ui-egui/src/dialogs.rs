@@ -438,6 +438,10 @@ pub fn confirm(app: &mut PhotocraftApp, id: u64) -> Result<Value, String> {
                 return Err("dialog has no command".into());
             };
             let (cmd, params) = crate::smart_ui::confirm_command(&d.fields, cmd, crate::filter_dialog::params_of(&d.fields));
+            let params = match d.fields.get("__recorded") {
+                Some(recorded) => crate::actions::merge_recorded(recorded, &params),
+                None => params,
+            };
             let result = app.run(&cmd, params.clone());
             // A filter that runs as a background job keeps its preview on screen until the job
             // lands (`canvas::committed_filter_preview`) instead of flashing the unfiltered image.
@@ -454,6 +458,9 @@ pub fn confirm(app: &mut PhotocraftApp, id: u64) -> Result<Value, String> {
             }
             if result.is_ok() {
                 crate::filter_dialog::remember(app, &cmd, &d.fields);
+                crate::actions::committed_dialog(app, &d.fields);
+            } else if d.fields.get("__actionPlayback").and_then(Value::as_bool) == Some(true) {
+                crate::actions::cancelled_playback(app);
             }
             result
         }
@@ -464,7 +471,10 @@ pub fn confirm(app: &mut PhotocraftApp, id: u64) -> Result<Value, String> {
 
 /// Cancel a dialog and its dependent Layer Style picker, without applying edits.
 pub fn cancel(app: &mut PhotocraftApp, id: u64) -> Result<Value, String> {
-    app.ui.close_dialog(id).ok_or_else(|| format!("no dialog {id}"))?;
+    let d = app.ui.close_dialog(id).ok_or_else(|| format!("no dialog {id}"))?;
+    if d.fields.get("__actionPlayback").and_then(Value::as_bool) == Some(true) {
+        crate::actions::cancelled_playback(app);
+    }
     app.ui.dialogs.retain(|d| !crate::layer_style::color_picker::child_of(&d.fields, id));
     app.filter_preview = None;
     app.color_range = None;

@@ -140,6 +140,26 @@ pub fn invoke(app: &mut PhotocraftApp, ctx: &egui::Context, id: &str, params: Va
 
 /// [`invoke`] without the unsaved-changes prompt, for once the user has already answered it.
 pub(crate) fn invoke_unguarded(app: &mut PhotocraftApp, ctx: &egui::Context, id: &str, params: Value) -> Result<Value, String> {
+    if let Some(index) = crate::actions::menu_capture_target(app) {
+        if !photocraft_engine::actions_cmds::replayable(id) {
+            app.ui.status = format!("`{id}` cannot be inserted into an action");
+            app.ui.status_error = true;
+            return Err(format!("`{id}` cannot be inserted into an action"));
+        }
+        let _ = crate::actions::take_menu_capture(app);
+        let mut body = json!({"action": index, "command": id});
+        if params.is_object() && params.as_object().is_some_and(|map| !map.is_empty()) {
+            body["params"] = params;
+        }
+        if app.ui.actions.selected == Some(index)
+            && let Some(step) = app.ui.actions.selected_step
+        {
+            body["after"] = json!(step);
+        }
+        app.ui.status = format!("Inserted {id}");
+        app.ui.status_error = false;
+        return app.run("actions.insertMenuItem", body);
+    }
     if id == "ui.symmetryTransform" {
         return crate::symmetry_ui::begin(app).map(|_| Value::Null);
     }

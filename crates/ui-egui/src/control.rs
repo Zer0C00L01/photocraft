@@ -1915,7 +1915,7 @@ mod tests {
             assert_eq!(r["ok"], false, "{r}");
             assert!(r["error"].as_str().unwrap().contains("ambient smart-object path denied"), "{r}");
             app.session.actions.list =
-                vec![photocraft_engine::actions_cmds::Action { name: "Linked contents".into(), steps: vec![(command.into(), json!({"layer": smart.0}))] }];
+                vec![photocraft_engine::actions_cmds::Action::new("Linked contents".into(), vec![(command.into(), json!({"layer": smart.0}))])];
             let r = call(&mut app, &ctx, "engine.execute", json!({"command": "actions.play", "params": {"action": "Linked contents"}}));
             assert_eq!(r["ok"], true, "{r}");
             assert_eq!(r["result"]["ran"], 0, "{r}");
@@ -1941,10 +1941,10 @@ mod tests {
     fn actions_play_checks_each_step_over_control() {
         let services = crate::Services { automation_authorize: Some(deny_ambient_file), ..Default::default() };
         let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), services);
-        app.session.actions.list.push(photocraft_engine::actions_cmds::Action {
-            name: "Open".into(),
-            steps: vec![("file.open".into(), json!({"path": "/etc/passwd"})), ("layer.new.layer".into(), json!({}))],
-        });
+        app.session.actions.list.push(photocraft_engine::actions_cmds::Action::new(
+            "Open".into(),
+            vec![("file.open".into(), json!({"path": "/etc/passwd"})), ("layer.new.layer".into(), json!({}))],
+        ));
         let ctx = egui::Context::default();
         let r = call(&mut app, &ctx, "engine.execute", json!({"command": "actions.play", "params": {"action": "Open"}}));
         assert_eq!(r["ok"], true, "{r}");
@@ -1959,10 +1959,10 @@ mod tests {
     fn actions_play_checks_each_step_for_synthetic_input() {
         let services = crate::Services { automation_authorize: Some(deny_ambient_file), ..Default::default() };
         let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), services);
-        app.session.actions.list.push(photocraft_engine::actions_cmds::Action {
-            name: "Open".into(),
-            steps: vec![("file.open".into(), json!({"path": "/etc/passwd"})), ("layer.new.layer".into(), json!({}))],
-        });
+        app.session.actions.list.push(photocraft_engine::actions_cmds::Action::new(
+            "Open".into(),
+            vec![("file.open".into(), json!({"path": "/etc/passwd"})), ("layer.new.layer".into(), json!({}))],
+        ));
         app.automation_input = true;
         let r = app.run("actions.play", json!({"action": "Open"})).unwrap();
         assert_eq!(r["ran"], 0, "{r}");

@@ -473,6 +473,10 @@ pub fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui, shown: &[Group], mut bod
                 crate::swatches_ui::panel_menu(app, ui);
                 ui.separator();
             }
+            if tabs.get(sel) == Some(&"Actions") {
+                crate::actions::panel_menu(app, ui);
+                ui.separator();
+            }
             if ui.button(if collapsed { tl!("Expand Panel Group") } else { tl!("Collapse Panel Group") }).clicked() {
                 actions.push(Action::ToggleCollapse(g));
                 ui.close();

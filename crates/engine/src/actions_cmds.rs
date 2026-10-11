@@ -21,13 +21,108 @@ fn bad(cmd: &str, msg: impl Into<String>) -> EngineError {
     EngineError::BadParams { cmd: cmd.into(), msg: msg.into() }
 }
 
+fn default_true() -> bool {
+    true
+}
+
 /// One recorded action. `steps` is the `[[id, params], …]` shape `file.automate.batch` and
 /// droplets already accept.
+///
+/// `enabled` is the action's checkbox. A step missing from [`Self::step_enabled`] is included.
+/// A step missing from [`Self::step_dialog`] plays with its recorded values and does not open a
+/// dialog. Older action files omit these fields and load as fully enabled, silent playback.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Action {
     pub name: String,
     #[serde(default)]
     pub steps: Vec<(String, Value)>,
+    /// Included when its set plays. Direct Play still runs the action.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Button-mode colour: `""`, `red`, `orange`, `yellow`, `green`, `blue`, `violet`, `gray`.
+    #[serde(default)]
+    pub color: String,
+    /// Parallel to `steps`. Missing entries are included.
+    #[serde(default)]
+    pub step_enabled: Vec<bool>,
+    /// Parallel to `steps`. Missing entries do not open a dialog.
+    #[serde(default)]
+    pub step_dialog: Vec<bool>,
+}
+
+impl Default for Action {
+    fn default() -> Self {
+        Self { name: String::new(), steps: Vec::new(), enabled: true, color: String::new(), step_enabled: Vec::new(), step_dialog: Vec::new() }
+    }
+}
+
+impl Action {
+    /// An included action with no button colour. Every step plays, and none opens a dialog.
+    pub fn new(name: String, steps: Vec<(String, Value)>) -> Self {
+        Self { name, steps, ..Self::default() }
+    }
+
+    /// The step's checkbox. An index past the flag list is included.
+    pub fn step_on(&self, index: usize) -> bool {
+        self.step_enabled.get(index).copied().unwrap_or(true)
+    }
+
+    /// The step's dialog toggle. An index past the flag list stays off.
+    pub fn step_dialog_on(&self, index: usize) -> bool {
+        self.step_dialog.get(index).copied().unwrap_or(false)
+    }
+}
+
+/// Button-mode colours Photoshop offers, in panel order. `""` is None.
+pub const BUTTON_COLORS: [&str; 8] = ["", "red", "orange", "yellow", "green", "blue", "violet", "gray"];
+
+/// Photoshop's colour index: 0 none, then red through gray.
+pub fn color_from_index(index: u16) -> &'static str {
+    BUTTON_COLORS.get(usize::from(index)).copied().unwrap_or("")
+}
+
+fn align_step_flags(action: &mut Action) {
+    let n = action.steps.len();
+    if action.step_enabled.len() < n {
+        action.step_enabled.resize(n, true);
+    } else if action.step_enabled.len() > n {
+        action.step_enabled.truncate(n);
+    }
+    if action.step_dialog.len() < n {
+        action.step_dialog.resize(n, false);
+    } else if action.step_dialog.len() > n {
+        action.step_dialog.truncate(n);
+    }
+}
+
+fn insert_step(action: &mut Action, index: usize, step: (String, Value), dialog: bool) {
+    align_step_flags(action);
+    let index = index.min(action.steps.len());
+    action.steps.insert(index, step);
+    action.step_enabled.insert(index, true);
+    action.step_dialog.insert(index, dialog);
+}
+
+fn remove_step_at(action: &mut Action, index: usize) {
+    align_step_flags(action);
+    if index < action.steps.len() {
+        action.steps.remove(index);
+        action.step_enabled.remove(index);
+        action.step_dialog.remove(index);
+    }
+}
+
+fn move_step_at(action: &mut Action, from: usize, to: usize) {
+    align_step_flags(action);
+    if from >= action.steps.len() || to >= action.steps.len() {
+        return;
+    }
+    let step = action.steps.remove(from);
+    let enabled = action.step_enabled.remove(from);
+    let dialog = action.step_dialog.remove(from);
+    action.steps.insert(to, step);
+    action.step_enabled.insert(to, enabled);
+    action.step_dialog.insert(to, dialog);
 }
 
 /// On-disk form of the Actions list (`actions.json` in the preset store).
@@ -80,6 +175,9 @@ pub struct ActionState {
     /// Shorter than `list` when an action was pushed without a folder.
     #[serde(default)]
     pub folders: Vec<String>,
+    /// While recording, new steps are inserted after this step. `None` appends.
+    #[serde(skip)]
+    pub recording_after: Option<usize>,
 }
 
 impl ActionState {
@@ -258,8 +356,9 @@ fn record(s: &mut Session, p: &Value) -> Result<Value> {
         if !set.is_empty() && !s.actions.sets.iter().any(|n| n == &set) && s.actions.sets.len() >= MAX_SETS {
             return Err(bad("actions.record", format!("at most {MAX_SETS} folders")));
         }
-        push_action(s, Action { name, steps: Vec::new() }, &set)?
+        push_action(s, Action::new(name, Vec::new()), &set)?
     };
+    s.actions.recording_after = None;
     s.actions.recording = Some((s.journal.len(), idx));
     let name = s.actions.list.get(idx).map(|a| a.name.clone()).unwrap_or_default();
     Ok(json!({"action": name, "index": idx}))
@@ -279,7 +378,21 @@ fn flush_recording(s: &mut Session) -> Result<()> {
     let steps: Vec<_> = pending_steps(s, idx).cloned().collect();
     s.actions.recording = Some((s.journal.len(), idx));
     if !steps.is_empty() {
-        s.actions.list[idx].steps.extend(steps);
+        let after = s.actions.recording_after;
+        if let Some(after) = after {
+            let mut at = after.saturating_add(1);
+            for step in steps {
+                let len = s.actions.list[idx].steps.len();
+                if at > len {
+                    at = len;
+                }
+                insert_step(&mut s.actions.list[idx], at, step, false);
+                at = at.saturating_add(1);
+            }
+            s.actions.recording_after = at.checked_sub(1);
+        } else {
+            s.actions.list[idx].steps.extend(steps);
+        }
         s.actions.touch();
     }
     Ok(())
@@ -292,14 +405,18 @@ fn stop(s: &mut Session, _p: &Value) -> Result<Value> {
     };
     flush_recording(s)?;
     s.actions.recording = None;
+    s.actions.recording_after = None;
     let action = &s.actions.list[idx];
     Ok(json!({"action": action.name, "steps": action.steps.len()}))
 }
 
-fn run_recorded(s: &mut Session, steps: &[(String, Value)], from: usize) -> (u64, Option<Value>) {
+fn run_recorded(s: &mut Session, action: &Action, from: usize) -> (u64, Option<Value>) {
     let mut ran = 0u64;
     let mut failed = None;
-    for (i, (id, params)) in steps.iter().enumerate().skip(from) {
+    for (i, (id, params)) in action.steps.iter().enumerate().skip(from) {
+        if !action.step_on(i) {
+            continue;
+        }
         if let Some(auth) = s.authorize
             && let Err(e) = auth(id, params)
         {
@@ -361,8 +478,14 @@ pub fn nested_failure(id: &str, value: &Value) -> Option<String> {
 
 fn play(s: &mut Session, p: &Value) -> Result<Value> {
     let (action, from) = playback_plan(s, p)?;
+    // A set plays only the actions whose checkbox is on. Play on the action itself ignores that
+    // checkbox and still skips unchecked steps.
+    let honor = p.get("honorEnabled").and_then(Value::as_bool).unwrap_or(false);
+    if honor && !action.enabled {
+        return Ok(json!({"action": action.name, "ran": 0, "skipped": true}));
+    }
     let recording = begin_playback(s, &action)?;
-    let (ran, failed) = run_recorded(s, &action.steps, from);
+    let (ran, failed) = run_recorded(s, &action, from);
     finish_playback(s, recording, &action, from);
     Ok(match failed {
         Some(f) => json!({"action": action.name, "ran": ran, "failed": f}),
@@ -394,10 +517,8 @@ fn move_item(s: &mut Session, p: &Value) -> Result<Value> {
         if s.actions.recording.is_some_and(|(_, i)| i == idx) {
             flush_recording(s)?;
         }
-        let action = &mut s.actions.list[idx];
-        let moved = action.steps.remove(step);
-        action.steps.insert(to, moved);
-        let result = json!({"action": action.name, "step": to});
+        move_step_at(&mut s.actions.list[idx], step, to);
+        let result = json!({"action": s.actions.list[idx].name, "step": to});
         s.actions.touch();
         Ok(result)
     } else {
@@ -445,8 +566,8 @@ fn delete(s: &mut Session, p: &Value) -> Result<Value> {
         if s.actions.recording.is_some_and(|(_, i)| i == idx) {
             flush_recording(s)?;
         }
-        let action = &mut s.actions.list[idx];
-        action.steps.remove(step);
+        remove_step_at(&mut s.actions.list[idx], step);
+        let action = &s.actions.list[idx];
         let result = json!({"action": action.name, "deletedStep": step, "steps": action.steps.len()});
         s.actions.touch();
         return Ok(result);
@@ -568,6 +689,259 @@ fn set_step(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"action": name, "step": step}))
 }
 
+fn on_flag(p: &Value, cmd: &str) -> Result<bool> {
+    match p.get("enabled").or_else(|| p.get("dialog")).or_else(|| p.get("on")) {
+        Some(Value::Bool(v)) => Ok(*v),
+        _ => Err(bad(cmd, "needs \"enabled\" or \"dialog\" (true or false)")),
+    }
+}
+
+fn refresh_included(action: &mut Action) {
+    align_step_flags(action);
+    action.enabled = action.steps.is_empty() || action.step_enabled.iter().any(|on| *on);
+}
+
+fn set_enabled(s: &mut Session, p: &Value) -> Result<Value> {
+    not_playing(s, "actions.setEnabled")?;
+    let on = on_flag(p, "actions.setEnabled")?;
+    if let Some(set) = p.get("set").and_then(Value::as_str) {
+        s.actions.align_folders();
+        let idxs: Vec<usize> = (0..s.actions.list.len()).filter(|i| s.actions.folder(*i) == set).collect();
+        for i in &idxs {
+            let action = &mut s.actions.list[*i];
+            align_step_flags(action);
+            for flag in &mut action.step_enabled {
+                *flag = on;
+            }
+            action.enabled = on || action.steps.is_empty();
+        }
+        s.actions.touch();
+        return Ok(json!({"set": set, "enabled": on, "actions": idxs.len()}));
+    }
+    let idx = resolve(&s.actions.list, p, "actions.setEnabled")?;
+    if let Some(step) = p.get("step") {
+        let step = step.as_u64().and_then(|n| usize::try_from(n).ok()).ok_or_else(|| bad("actions.setEnabled", "step must be a non-negative integer"))?;
+        let action = &mut s.actions.list[idx];
+        if step >= action.steps.len() {
+            return Err(bad("actions.setEnabled", "step is out of range"));
+        }
+        align_step_flags(action);
+        if let Some(flag) = action.step_enabled.get_mut(step) {
+            *flag = on;
+        }
+        refresh_included(action);
+        let name = action.name.clone();
+        s.actions.touch();
+        return Ok(json!({"action": name, "step": step, "enabled": on}));
+    }
+    let action = &mut s.actions.list[idx];
+    align_step_flags(action);
+    for flag in &mut action.step_enabled {
+        *flag = on;
+    }
+    let enabled = on || action.steps.is_empty();
+    action.enabled = enabled;
+    let name = action.name.clone();
+    s.actions.touch();
+    Ok(json!({"action": name, "enabled": enabled}))
+}
+
+fn set_dialog(s: &mut Session, p: &Value) -> Result<Value> {
+    not_playing(s, "actions.setDialog")?;
+    let on = match p.get("dialog").or_else(|| p.get("enabled")) {
+        Some(Value::Bool(v)) => *v,
+        _ => return Err(bad("actions.setDialog", "needs \"dialog\" (true or false)")),
+    };
+    let idx = resolve(&s.actions.list, p, "actions.setDialog")?;
+    let action = &mut s.actions.list[idx];
+    align_step_flags(action);
+    if let Some(step) = p.get("step") {
+        let step = step.as_u64().and_then(|n| usize::try_from(n).ok()).ok_or_else(|| bad("actions.setDialog", "step must be a non-negative integer"))?;
+        let Some(flag) = action.step_dialog.get_mut(step) else {
+            return Err(bad("actions.setDialog", "step is out of range"));
+        };
+        *flag = on;
+        let name = action.name.clone();
+        s.actions.touch();
+        return Ok(json!({"action": name, "step": step, "dialog": on}));
+    }
+    for flag in &mut action.step_dialog {
+        *flag = on;
+    }
+    let name = action.name.clone();
+    s.actions.touch();
+    Ok(json!({"action": name, "dialog": on}))
+}
+
+fn set_color(s: &mut Session, p: &Value) -> Result<Value> {
+    not_playing(s, "actions.setColor")?;
+    let idx = resolve(&s.actions.list, p, "actions.setColor")?;
+    let Some(color) = p.get("color").and_then(Value::as_str) else {
+        return Err(bad("actions.setColor", "needs \"color\""));
+    };
+    if !BUTTON_COLORS.contains(&color) {
+        return Err(bad("actions.setColor", "color must be none, red, orange, yellow, green, blue, violet or gray"));
+    }
+    s.actions.list[idx].color = color.to_string();
+    let name = s.actions.list[idx].name.clone();
+    s.actions.touch();
+    Ok(json!({"action": name, "color": color}))
+}
+
+fn set_name(s: &mut Session, p: &Value) -> Result<Value> {
+    not_playing(s, "actions.rename")?;
+    let idx = resolve(&s.actions.list, p, "actions.rename")?;
+    let Some(name) = p.get("name").and_then(Value::as_str) else {
+        return Err(bad("actions.rename", "needs \"name\""));
+    };
+    if name.is_empty() {
+        return Err(bad("actions.rename", "name is empty"));
+    }
+    if name.chars().count() > 256 {
+        return Err(bad("actions.rename", "name must be at most 256 characters"));
+    }
+    if s.actions.list.iter().enumerate().any(|(i, action)| i != idx && action.name == name) {
+        return Err(bad("actions.rename", "an action with this name already exists"));
+    }
+    s.actions.list[idx].name = name.to_string();
+    s.actions.touch();
+    Ok(json!({"action": name}))
+}
+
+fn duplicate(s: &mut Session, p: &Value) -> Result<Value> {
+    not_playing(s, "actions.duplicate")?;
+    if s.actions.recording.is_some() {
+        return Err(bad("actions.duplicate", "stop recording first"));
+    }
+    let idx = resolve(&s.actions.list, p, "actions.duplicate")?;
+    if let Some(step) = p.get("step") {
+        let step = step.as_u64().and_then(|n| usize::try_from(n).ok()).ok_or_else(|| bad("actions.duplicate", "step must be a non-negative integer"))?;
+        let action = &s.actions.list[idx];
+        if step >= action.steps.len() {
+            return Err(bad("actions.duplicate", "step is out of range"));
+        }
+        let copied = action.steps[step].clone();
+        let dialog = action.step_dialog_on(step);
+        let enabled = action.step_on(step);
+        let at = step.saturating_add(1);
+        insert_step(&mut s.actions.list[idx], at, copied, dialog);
+        if let Some(flag) = s.actions.list[idx].step_enabled.get_mut(at) {
+            *flag = enabled;
+        }
+        let name = s.actions.list[idx].name.clone();
+        s.actions.touch();
+        return Ok(json!({"action": name, "step": at}));
+    }
+    let copy = s.actions.list[idx].clone();
+    let name = unique_copy_name(&s.actions.list, &copy.name)?;
+    let folder = s.actions.folder(idx).to_string();
+    let mut copy = copy;
+    copy.name = name.clone();
+    let index = push_action(s, copy, &folder)?;
+    Ok(json!({"action": name, "index": index}))
+}
+
+fn unique_copy_name(list: &[Action], name: &str) -> Result<String> {
+    let mut n = 1u32;
+    loop {
+        let candidate = if n == 1 { format!("{name} copy") } else { format!("{name} copy {n}") };
+        if !list.iter().any(|action| action.name == candidate) {
+            return Ok(candidate);
+        }
+        n = n.checked_add(1).ok_or_else(|| bad("actions.duplicate", "could not allocate a unique action name"))?;
+        if n > 100_000 {
+            return Err(bad("actions.duplicate", "could not allocate a unique action name"));
+        }
+    }
+}
+
+fn placed_index(action: &Action, p: &Value, cmd: &str) -> Result<usize> {
+    match p.get("after") {
+        None | Some(Value::Null) => Ok(action.steps.len()),
+        Some(v) => {
+            let Some(i) = v.as_u64().and_then(|n| usize::try_from(n).ok()) else {
+                return Err(bad(cmd, "\"after\" must be a step index"));
+            };
+            if i >= action.steps.len() {
+                return Err(bad(cmd, "\"after\" is out of range"));
+            }
+            Ok(i.saturating_add(1))
+        }
+    }
+}
+
+fn insert_stop(s: &mut Session, p: &Value) -> Result<Value> {
+    not_playing(s, "actions.insertStop")?;
+    let idx = resolve(&s.actions.list, p, "actions.insertStop")?;
+    let message = match p.get("message") {
+        None | Some(Value::Null) => String::new(),
+        Some(Value::String(text)) if text.chars().count() <= 2_000 => text.clone(),
+        Some(Value::String(_)) => return Err(bad("actions.insertStop", "message must be at most 2000 characters")),
+        Some(_) => return Err(bad("actions.insertStop", "\"message\" must be a string")),
+    };
+    let allow = p.get("allowContinue").and_then(Value::as_bool).unwrap_or(true);
+    let at = placed_index(&s.actions.list[idx], p, "actions.insertStop")?;
+    insert_step(&mut s.actions.list[idx], at, ("actions.message".into(), json!({"message": message, "allowContinue": allow})), true);
+    let name = s.actions.list[idx].name.clone();
+    s.actions.touch();
+    Ok(json!({"action": name, "step": at}))
+}
+
+fn insert_menu_item(s: &mut Session, p: &Value) -> Result<Value> {
+    not_playing(s, "actions.insertMenuItem")?;
+    let idx = resolve(&s.actions.list, p, "actions.insertMenuItem")?;
+    let Some(command) = p.get("command").and_then(Value::as_str).filter(|id| !id.is_empty()) else {
+        return Err(bad("actions.insertMenuItem", "needs \"command\""));
+    };
+    if !replayable(command) {
+        return Err(bad("actions.insertMenuItem", format!("`{command}` cannot be inserted into an action")));
+    }
+    let params = match p.get("params") {
+        None | Some(Value::Null) => json!({}),
+        Some(v) if v.is_object() => v.clone(),
+        Some(_) => return Err(bad("actions.insertMenuItem", "\"params\" must be an object")),
+    };
+    let at = placed_index(&s.actions.list[idx], p, "actions.insertMenuItem")?;
+    insert_step(&mut s.actions.list[idx], at, (command.to_string(), params), false);
+    let name = s.actions.list[idx].name.clone();
+    s.actions.touch();
+    Ok(json!({"action": name, "step": at, "command": command}))
+}
+
+fn message(s: &mut Session, p: &Value) -> Result<Value> {
+    let _ = s;
+    let allow = p.get("allowContinue").and_then(Value::as_bool).unwrap_or(true);
+    let text = p.get("message").and_then(Value::as_str).unwrap_or("");
+    if text.chars().count() > 2_000 {
+        return Err(bad("actions.message", "message must be at most 2000 characters"));
+    }
+    if !allow {
+        let msg = if text.is_empty() { "stopped".to_string() } else { text.to_string() };
+        return Err(bad("actions.message", msg));
+    }
+    Ok(json!({"message": text, "continued": true}))
+}
+
+fn clear_actions(s: &mut Session, _p: &Value) -> Result<Value> {
+    not_playing(s, "actions.clear")?;
+    if s.actions.recording.is_some() {
+        return Err(bad("actions.clear", "stop recording first"));
+    }
+    let n = s.actions.list.len();
+    s.actions.list.clear();
+    s.actions.sets.clear();
+    s.actions.folders.clear();
+    s.actions.recording_after = None;
+    s.actions.touch();
+    Ok(json!({"cleared": n}))
+}
+
+fn reset_actions(s: &mut Session, p: &Value) -> Result<Value> {
+    clear_actions(s, p)?;
+    crate::dtf_cmds::ensure_preset(s);
+    Ok(json!({"actions": s.actions.list.len()}))
+}
+
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         CommandSpec {
@@ -678,6 +1052,136 @@ pub fn specs() -> Vec<CommandSpec> {
             params: r##"{"action":name|index, "step":index, "params":object} → {action, step}. Replaces that step's parameters. Numbers, strings and booleans are what the Actions panel edits."##,
             enabled: always,
             run: set_step,
+            journal: false,
+        },
+        CommandSpec {
+            id: "actions.setEnabled",
+            label: "Enable Action or Step",
+            menu: &[],
+            shortcut: None,
+            params: r##"{"enabled":bool, "set":str?} or {"action":name|index, "step":index?, "enabled":bool}. A set or action checkbox turns every nested step on or off. A step checkbox leaves the others alone. Unchecked steps are skipped on playback."##,
+            enabled: always,
+            run: set_enabled,
+            journal: false,
+        },
+        CommandSpec {
+            id: "actions.setDialog",
+            label: "Toggle Action Dialog",
+            menu: &[],
+            shortcut: None,
+            params: r##"{"action":name|index, "step":index?, "dialog":bool}. When dialog is true, desktop playback opens the step's dialog. Headless playback still uses the recorded values."##,
+            enabled: always,
+            run: set_dialog,
+            journal: false,
+        },
+        CommandSpec {
+            id: "actions.setColor",
+            label: "Set Action Button Color",
+            menu: &[],
+            shortcut: None,
+            params: r##"{"action":name|index, "color":""|"red"|"orange"|"yellow"|"green"|"blue"|"violet"|"gray"} → {action, color}. Empty is None."##,
+            enabled: always,
+            run: set_color,
+            journal: false,
+        },
+        CommandSpec {
+            id: "actions.rename",
+            label: "Rename Action",
+            menu: &[],
+            shortcut: None,
+            params: r##"{"action":name|index, "name":str} → {action}. Refuses an empty name, a name over 256 characters, or a duplicate."##,
+            enabled: always,
+            run: set_name,
+            journal: false,
+        },
+        CommandSpec {
+            id: "actions.duplicate",
+            label: "Duplicate Action or Step",
+            menu: &[],
+            shortcut: None,
+            params: r##"{"action":name|index, "step":index?} → {action, index|step}. A step is copied just after itself. An action is copied in the same set as "Name copy"."##,
+            enabled: always,
+            run: duplicate,
+            journal: false,
+        },
+        CommandSpec {
+            id: "actions.insertStop",
+            label: "Insert Stop",
+            menu: &[],
+            shortcut: None,
+            params: r##"{"action":name|index, "message":str?="", "allowContinue":bool=true, "after":index?} → {action, step}. Playback shows the message. Without allowContinue, playback stops there."##,
+            enabled: always,
+            run: insert_stop,
+            journal: false,
+        },
+        CommandSpec {
+            id: "actions.insertMenuItem",
+            label: "Insert Menu Item",
+            menu: &[],
+            shortcut: None,
+            params: r##"{"action":name|index, "command":id, "params":object?={}, "after":index?} → {action, step, command}. Inserts a command without running it. The command must be one recording would keep."##,
+            enabled: always,
+            run: insert_menu_item,
+            journal: false,
+        },
+        CommandSpec {
+            id: "actions.message",
+            label: "Action Stop",
+            menu: &[],
+            shortcut: None,
+            params: r##"{"message":str?="", "allowContinue":bool=true} → {message, continued}. Inserted by actions.insertStop. Refuses to continue when allowContinue is false."##,
+            enabled: always,
+            run: message,
+            journal: false,
+        },
+        CommandSpec {
+            id: "actions.clear",
+            label: "Clear All Actions",
+            menu: &[],
+            shortcut: None,
+            params: "{} → {cleared}. Removes every action and set. Refuses while recording or playing.",
+            enabled: always,
+            run: clear_actions,
+            journal: false,
+        },
+        CommandSpec {
+            id: "actions.reset",
+            label: "Reset Actions",
+            menu: &[],
+            shortcut: None,
+            params: "{} → {actions}. Clears the list and restores the built-in DTF action.",
+            enabled: always,
+            run: reset_actions,
+            journal: false,
+        },
+        CommandSpec {
+            id: "actions.importAtn",
+            label: "Import Photoshop Actions",
+            menu: &[],
+            shortcut: None,
+            params: r##"{"base64":str|"bytes":[0..255…], "replace":bool=false} → {set, skipped:[…], shortcuts:[{action, shortcut}], actions}. Loads a .atn set. Steps PhotoCraft cannot play are listed in skipped and omitted. replace clears the current list first."##,
+            enabled: always,
+            run: crate::atn_import::import_atn,
+            journal: false,
+        },
+        CommandSpec {
+            id: "actions.importJson",
+            label: "Import Actions JSON",
+            menu: &[],
+            shortcut: None,
+            params: r##"{"text":str, "replace":bool=false} → {actions}. Loads a PhotoCraft actions file (the JSON actions.exportJson writes)."##,
+            enabled: always,
+            run: crate::atn_import::import_json,
+            journal: false,
+        },
+        CommandSpec {
+            id: "actions.exportJson",
+            label: "Export Actions JSON",
+            menu: &[],
+            shortcut: None,
+            params: r##"{"set":str?} → {text}. Writes one set, or every action when set is omitted, as a PhotoCraft actions file."##,
+            enabled: always,
+            run: crate::atn_import::export_json,
             journal: false,
         },
     ]
@@ -825,7 +1329,7 @@ mod tests {
     #[test]
     fn play_refuses_recursion() {
         let mut s = Session::new();
-        s.actions.list.push(Action { name: "Loop".into(), steps: vec![("actions.play".into(), json!({"action": "Loop"}))] });
+        s.actions.list.push(Action::new("Loop".into(), vec![("actions.play".into(), json!({"action": "Loop"}))]));
         let r = s.execute("actions.play", json!({"action": "Loop"})).unwrap();
         assert_eq!(r["ran"], 0);
         assert_eq!(r["failed"]["id"], "actions.play");
@@ -840,9 +1344,7 @@ mod tests {
         }
         let mut s = Session::new();
         s.authorize = Some(deny_file);
-        s.actions
-            .list
-            .push(Action { name: "Open".into(), steps: vec![("file.open".into(), json!({"path": "/etc/passwd"})), ("layer.new.layer".into(), json!({}))] });
+        s.actions.list.push(Action::new("Open".into(), vec![("file.open".into(), json!({"path": "/etc/passwd"})), ("layer.new.layer".into(), json!({}))]));
         let r = s.execute("actions.play", json!({"action": "Open"})).unwrap();
         assert_eq!(r["ran"], 0);
         assert_eq!(r["failed"]["step"], 0);
@@ -915,7 +1417,7 @@ mod tests {
     fn nested_call_records_one_named_step_and_tracks_child_edits() {
         let mut s = Session::new();
         s.execute("file.new", json!({"width": 4, "height": 4})).unwrap();
-        s.actions.list.push(Action { name: "Child".into(), steps: vec![("layer.new.layer".into(), json!({"name": "Child layer"}))] });
+        s.actions.list.push(Action::new("Child".into(), vec![("layer.new.layer".into(), json!({"name": "Child layer"}))]));
         s.execute("actions.record", json!({"name": "Parent"})).unwrap();
         s.execute("layer.new.layer", json!({"name": "Before"})).unwrap();
         s.execute("actions.play", json!({"action": 0})).unwrap();
@@ -940,11 +1442,10 @@ mod tests {
     #[test]
     fn nested_failure_cycles_depth_and_authorization_stop_parent() {
         let mut s = Session::new();
-        s.actions.list.push(Action {
-            name: "A".into(),
-            steps: vec![("actions.play".into(), json!({"action": "B"})), ("file.new".into(), json!({"width": 2,"height": 2}))],
-        });
-        s.actions.list.push(Action { name: "B".into(), steps: vec![("actions.play".into(), json!({"action": "A"}))] });
+        s.actions
+            .list
+            .push(Action::new("A".into(), vec![("actions.play".into(), json!({"action": "B"})), ("file.new".into(), json!({"width": 2,"height": 2}))]));
+        s.actions.list.push(Action::new("B".into(), vec![("actions.play".into(), json!({"action": "A"}))]));
         let r = s.execute("actions.play", json!({"action": "A"})).unwrap();
         assert!(r["failed"]["error"].as_str().unwrap().contains("recursive"));
         assert!(s.documents().is_empty());
@@ -956,10 +1457,9 @@ mod tests {
         s.authorize = None;
         s.actions.list.clear();
         for i in 0..17 {
-            s.actions.list.push(Action {
-                name: format!("N{i}"),
-                steps: if i < 16 { vec![("actions.play".into(), json!({"action":format!("N{}", i + 1)}))] } else { vec![] },
-            });
+            s.actions
+                .list
+                .push(Action::new(format!("N{i}"), if i < 16 { vec![("actions.play".into(), json!({"action":format!("N{}", i + 1)}))] } else { vec![] }));
         }
         let r = s.execute("actions.play", json!({"action": "N0"})).unwrap();
         assert!(r["failed"]["error"].as_str().unwrap().contains("16 levels"));
@@ -1003,7 +1503,7 @@ mod tests {
     #[test]
     fn new_names_do_not_collide_with_named_calls() {
         let mut s = Session::new();
-        s.actions.list.push(Action { name: "Action 2".into(), steps: vec![] });
+        s.actions.list.push(Action::new("Action 2".into(), vec![]));
         assert_eq!(s.execute("actions.record", json!({})).unwrap()["action"], "Action 3");
         s.execute("actions.stop", json!({})).unwrap();
         assert!(s.execute("actions.record", json!({"name":"Action 2"})).is_err());
@@ -1015,7 +1515,7 @@ mod tests {
         let mut s = Session::new();
         s.execute("file.new", json!({"width":4,"height":4})).unwrap();
         for name in ["A", "B", "C"] {
-            s.actions.list.push(Action { name: name.into(), steps: vec![] });
+            s.actions.list.push(Action::new(name.into(), vec![]));
         }
         s.execute("actions.record", json!({"action":"B"})).unwrap();
         s.execute("layer.new.layer", json!({"name":"before"})).unwrap();
@@ -1057,6 +1557,19 @@ mod tests {
             "actions.deleteSet",
             "actions.setFolder",
             "actions.setStep",
+            "actions.setEnabled",
+            "actions.setDialog",
+            "actions.setColor",
+            "actions.rename",
+            "actions.duplicate",
+            "actions.insertStop",
+            "actions.insertMenuItem",
+            "actions.message",
+            "actions.clear",
+            "actions.reset",
+            "actions.importAtn",
+            "actions.importJson",
+            "actions.exportJson",
         ] {
             for p in &junk {
                 let _ = s.execute(id, p.clone());
@@ -1064,6 +1577,30 @@ mod tests {
         }
         assert_eq!(s.actions.playing, 0);
         assert!(crate::commands::command_specs().iter().any(|c| c.id == "actions.play" && !c.journal && c.menu.is_empty()));
+    }
+
+    #[test]
+    fn disabled_steps_are_skipped_and_a_disabled_action_can_be_honored() {
+        let mut s = Session::new();
+        s.execute("file.new", json!({"width": 8, "height": 8})).unwrap();
+        s.actions.list.push(Action::new("Two".into(), vec![("layer.new.layer".into(), json!({})), ("layer.new.layer".into(), json!({}))]));
+        s.execute("actions.setEnabled", json!({"action": 0, "step": 1, "enabled": false})).unwrap();
+        let played = s.execute("actions.play", json!({"action": 0})).unwrap();
+        assert_eq!(played["ran"], 1);
+        assert_eq!(s.active().unwrap().doc.layers.len(), 2);
+        s.execute("actions.setEnabled", json!({"action": 0, "enabled": false})).unwrap();
+        let skipped = s.execute("actions.play", json!({"action": 0, "honorEnabled": true})).unwrap();
+        assert_eq!(skipped["ran"], 0);
+        assert_eq!(skipped["skipped"], true);
+        assert_eq!(s.active().unwrap().doc.layers.len(), 2);
+        assert!(s.execute("actions.setColor", json!({"action": 0, "color": "pink"})).is_err());
+        assert!(s.execute("actions.rename", json!({"action": 0})).is_err());
+        assert!(s.execute("actions.insertMenuItem", json!({"action": 0, "command": "actions.delete"})).is_err());
+        assert!(s.execute("actions.importAtn", json!({"base64": "!!!!"})).is_err());
+        assert!(s.execute("actions.message", json!({"allowContinue": false, "message": "stop here"})).is_err());
+        let stopped = s.execute("actions.insertStop", json!({"action": 0, "message": "check the spot", "allowContinue": true})).unwrap();
+        assert_eq!(stopped["step"], 2);
+        assert!(s.actions.list[0].step_dialog_on(2));
     }
 
     #[cfg(not(target_arch = "wasm32"))]
