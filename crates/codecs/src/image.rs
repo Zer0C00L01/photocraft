@@ -131,6 +131,12 @@ pub struct Metadata {
     /// samples (spot colours, extra alpha channels) the pixel layout does not hold. Each entry
     /// is one sample per pixel, native endian, in the image's [`SampleType`], row-major.
     pub extra_samples: Vec<ExtraSample>,
+    /// When non-zero, `data` is already chunky colour (the layout's channels, alpha removed)
+    /// followed by this many extra samples per pixel, packed in the bytes the layout otherwise
+    /// calls alpha. `extra_samples[i].data` is ignored and `extra_samples[i].kind` is still
+    /// written. TIFF then does not also mark an unassociated alpha sample. Zero keeps extras,
+    /// when there are any, in `extra_samples[].data`.
+    pub interleaved_extras: usize,
 }
 
 /// How many extra TIFF samples an encoded file may carry. Decoders keep at most this many.
@@ -156,6 +162,7 @@ impl Metadata {
             && self.photoshop_resources.is_none()
             && self.photoshop_layers.is_none()
             && self.extra_samples.is_empty()
+            && self.interleaved_extras == 0
     }
 }
 

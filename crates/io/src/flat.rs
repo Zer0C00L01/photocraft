@@ -149,7 +149,8 @@ pub(crate) fn image_to_document(name: &str, img: &Image) -> Result<ImportResult,
     let fmt = PixelFormat::new(mode, depth, true);
     let mut s = Surface::new(fmt);
     if img.layout() == target_layout && img.sample_type() == csample {
-        s.write_interleaved(Rect::new(0, 0, w as i32, h as i32), img.data());
+        s.write_interleaved_sparse(Rect::new(0, 0, w as i32, h as i32), img.data())
+            .map_err(|e| IoError::Unsupported(format!("not enough memory to open the image ({e})")))?;
     } else {
         // Converted a band of rows at a time: no second full-size copy of the image.
         let row = img.data().len() / (h.max(1) as usize);
@@ -158,7 +159,8 @@ pub(crate) fn image_to_document(name: &str, img: &Image) -> Result<ImportResult,
             let n = (rows.len() / row.max(1)) as u32;
             let part = Image::from_raw(w, n, img.layout(), img.sample_type(), rows.to_vec())?.convert(target_layout, csample);
             let y0 = (i * band) as i32;
-            s.write_interleaved(Rect::new(0, y0, w as i32, y0 + n as i32), part.data());
+            s.write_interleaved_sparse(Rect::new(0, y0, w as i32, y0 + n as i32), part.data())
+                .map_err(|e| IoError::Unsupported(format!("not enough memory to open the image ({e})")))?;
         }
     }
     s.prune();
@@ -405,7 +407,13 @@ pub fn export_flat(doc: &Document, format: Format, opts: &ExportOptions) -> Resu
         img = tga_alpha_channel(doc, img, &mut warnings)?;
     }
     if format == Format::Tiff {
-        warnings.extend(crate::tiff_layers::stamp_flat_channels(doc, &mut img));
+        // One 8-bit extra channel is matted into the colour buffer in place. Anything else
+        // (several channels, another depth) keeps the separate-plane path.
+        if let Some(extra) = crate::tiff_layers::fuse_u8_rgba_one_extra(doc, &mut img) {
+            warnings.extend(extra);
+        } else {
+            warnings.extend(crate::tiff_layers::stamp_flat_channels(doc, &mut img));
+        }
     }
     encode_image(&img, format, opts, warnings)
 }
