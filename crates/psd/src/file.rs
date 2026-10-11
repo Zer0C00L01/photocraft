@@ -38,6 +38,14 @@ pub struct GlobalLayerMask {
 }
 
 impl GlobalLayerMask {
+    /// The mask Photoshop writes for a layered file that has no global mask of its own:
+    /// an RGB red overlay at 50% opacity, kind 128 (use the per-layer setting), plus the
+    /// filler byte. A zero-length `LMsk` block in a TIFF makes Photoshop give up on the
+    /// layer data (it reads this 14-byte record from the block).
+    pub fn photoshop_default() -> Self {
+        GlobalLayerMask { data: vec![0, 0, 0xff, 0xff, 0, 0, 0, 0, 0, 0, 0, 50, 128, 0] }
+    }
+
     fn be16(&self, at: usize) -> Option<u16> {
         self.data.get(at..at + 2).map(|b| u16::from_be_bytes([b[0], b[1]]))
     }

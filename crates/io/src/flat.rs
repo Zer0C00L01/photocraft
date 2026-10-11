@@ -160,6 +160,7 @@ pub(crate) fn image_to_document(name: &str, img: &Image) -> Result<ImportResult,
         bg
     };
     doc.layers.push(layer);
+    warnings.extend(crate::tiff_layers::channels_from_extras(&mut doc, img));
     doc.icc_profile = img.icc.clone().map(Arc::new);
     doc.metadata.exif = img.meta.exif.clone().map(Arc::new);
     doc.metadata.xmp = img.meta.xmp.clone();
@@ -419,6 +420,9 @@ pub fn export_flat(doc: &Document, format: Format, opts: &ExportOptions) -> Resu
     }
     if format == Format::Tga {
         img = tga_alpha_channel(doc, img, &mut warnings)?;
+    }
+    if format == Format::Tiff {
+        warnings.extend(crate::tiff_layers::stamp_flat_channels(doc, &mut img));
     }
     encode_image(&img, format, opts, warnings)
 }
