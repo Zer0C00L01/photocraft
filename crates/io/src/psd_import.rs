@@ -603,7 +603,7 @@ fn be_to_ne_plane(plane: &[u8], s: SampleType, n: usize) -> Vec<u8> {
     interleave(&[Some(plane)], &[zero_sample(s)], n, s, &[false])
 }
 
-fn unicode_names(data: &[u8]) -> Vec<String> {
+pub(crate) fn unicode_names(data: &[u8]) -> Vec<String> {
     let mut out = Vec::new();
     let mut at = 0;
     while at + 4 <= data.len() {
@@ -826,6 +826,10 @@ pub(crate) fn psd_to_document_decoded(
                 doc.clipping_path = Some(photocraft_doc::ClippingPath { name, flatness: 0.0 });
                 doc.metadata.psd_resources.push((r.id, String::from_utf8_lossy(&r.name).into_owned(), Arc::new(r.data.clone())));
             }
+            // Resource 1053 is rewritten from the extra channels on a layered save, so keeping
+            // the copy just written would show up as new metadata. Multichannel has no such
+            // rewrite: the imported bytes are the channel ids, copied back when they still match.
+            crate::channel_map::ALPHA_IDENTIFIERS if !multichannel => {}
             id if MAPPED_RESOURCES.contains(&id) => {}
             id => doc.metadata.psd_resources.push((id, String::from_utf8_lossy(&r.name).into_owned(), Arc::new(r.data.clone()))),
         }
@@ -1019,13 +1023,31 @@ pub(crate) fn psd_to_document_decoded(
     {
         let first = cc + usize::from(file.merged_has_alpha());
         let names = file.resource(1045).map(|r| unicode_names(&r.data)).unwrap_or_default();
+        let extra_n = usize::from(h.channels).saturating_sub(first);
         // Photoshop lists every extra channel, the merged transparency first when there is one.
         let skip = usize::from(file.merged_has_alpha() && names.len() == usize::from(h.channels).saturating_sub(cc));
-        let names = names.get(skip..).unwrap_or_default();
+        let names = names.get(skip..).unwrap_or(&[]);
+        // Spot planes are ink-inverted in the file (0 = solid). Alpha planes are not.
+        // DisplayInfo lists the transparency record first when `skip` is 1.
+        let spots = {
+            let n = extra_n.saturating_add(skip);
+            let all = if let Some(r) = file.resource(crate::channel_map::DISPLAY_INFO) {
+                crate::channel_map::spot_flags(&r.data, true, n)
+            } else if let Some(r) = file.resource(crate::channel_map::DISPLAY_INFO_OLD) {
+                crate::channel_map::spot_flags(&r.data, false, n)
+            } else {
+                vec![false; n]
+            };
+            all.into_iter().skip(skip).collect::<Vec<_>>()
+        };
         for (k, idx) in (first..usize::from(h.channels)).enumerate() {
             let Some(p) = merged_plane(all, idx, plane) else { break };
+            let mut raw = be_to_ne_plane(p, depth, n);
+            if spots.get(k).copied().unwrap_or(false) {
+                crate::pixels::invert_plane(&mut raw, depth, false);
+            }
             let mut s = Surface::new(cx.mask_fmt);
-            s.write_interleaved(canvas, &be_to_ne_plane(p, depth, n));
+            s.write_interleaved(canvas, &raw);
             s.prune();
             let name = names.get(k).cloned().unwrap_or_else(|| format!("Alpha {}", k + 1));
             doc.channels.push(AlphaChannel::new(name, s));
