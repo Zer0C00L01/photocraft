@@ -250,6 +250,11 @@ pub(crate) fn export_layered(doc: &Document, opts: &ExportOptions, ctl: &photocr
     if spot_extras && let Some(info) = &mut isd.layer_info {
         info.merged_alpha = false;
     }
+    // A merged-transparency marker kept from an opened file (Photoshop's `MTrn`) would make the
+    // first spot read back as transparency: keep it only while the composite keeps that sample.
+    if spot_extras || !file.layer_info.as_ref().is_some_and(|l| l.merged_alpha) {
+        isd.global_blocks.retain(|b| !b.is_merged_transparency_marker());
+    }
     if let Some(info) = &mut isd.layer_info {
         for layer in &mut info.layers {
             photoshop_layer_blocks(&mut layer.blocks);

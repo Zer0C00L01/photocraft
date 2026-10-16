@@ -1790,7 +1790,7 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32, c
     // Photoshop writes a merged-transparency marker (`Mtrn`, `Mt16`, `Mt32`) before the layer
     // block, and won't open a file whose `Lr32` comes first (#5068): the layer block goes right
     // after the last kept marker, else first.
-    let index = global_blocks.iter().rposition(|b| matches!(&b.key, b"Mtrn" | b"Mt16" | b"Mt32")).map_or(0, |i| i + 1);
+    let index = global_blocks.iter().rposition(TaggedBlock::is_merged_transparency_marker).map_or(0, |i| i + 1);
     let placement = match (has_layers, sample) {
         (true, SampleType::U16) => LayerInfoPlacement::GlobalBlock { index, signature: *b"8BIM", key: *b"Lr16", padding: None },
         (true, SampleType::F32) => LayerInfoPlacement::GlobalBlock { index, signature: *b"8BIM", key: *b"Lr32", padding: None },
