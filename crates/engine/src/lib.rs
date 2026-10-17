@@ -34,6 +34,7 @@ mod crop_fill;
 pub mod cutout_cmds;
 pub mod display_color;
 pub mod distort_cmds;
+pub mod doc_path;
 pub mod document_preset_cmds;
 pub mod edit_cmds;
 pub mod edit_menu_cmds;
@@ -41,6 +42,7 @@ pub mod eraser_cmds;
 pub mod export_preset_cmds;
 pub mod exr_cmds;
 pub mod extra_cmds;
+pub mod face_cmds;
 pub mod file_cmds;
 pub mod fill_cmds;
 pub mod fill_key_cmds;
@@ -103,6 +105,7 @@ pub mod sample_cmds;
 pub mod sampler_cmds;
 pub mod select_extra_cmds;
 pub mod selection_cmds;
+pub mod shell_commands;
 pub mod shortcut_sets;
 pub mod slice_cmds;
 pub mod smart_cmds;
@@ -154,6 +157,10 @@ pub enum EngineError {
     NoDocument,
     #[error("no such layer {0:?}")]
     NoLayer(LayerId),
+    /// [`Self::NoLayer`] as a command reports it: with the layers the document does have, as
+    /// ids are not positions (#5058).
+    #[error("no such layer {}; {known}", id.0)]
+    UnknownLayer { id: LayerId, known: String },
     #[error("{0}")]
     Other(String),
     /// A background job was cancelled (see [`jobs`]); nothing changed.
@@ -421,6 +428,14 @@ pub struct CopiedStyle {
     pub mode: photocraft_color::ColorMode,
 }
 
+/// The commands whose [`Session::precheck`] is complete: it accepts what `execute` does (Free
+/// Transform applies its box before these, and only when they will run), but for the group
+/// nesting limit ([`photocraft_doc::MAX_GROUP_DEPTH`]): grouping layers already that deep is
+/// refused only as the edit is made. Layer via Copy and
+/// Cut aren't: whether they have anything to copy (a selection over transparent pixels, a group
+/// or fill layer) is known only when they run.
+pub const PRECHECKED: &[&str] = &["layer.new.layer", "layer.new.group", "layer.new.groupFromLayers", "layer.new.layerFromBackground"];
+
 #[derive(Default)]
 pub struct Session {
     docs: Vec<DocState>,
@@ -659,6 +674,53 @@ impl Session {
         self.live_commit = None;
     }
 
+    /// Check a call without running it: the command exists, its params have the shape
+    /// [`Self::execute`] requires (New Layer's fully), and it can run now. For a caller that does
+    /// something first only when the command will go through: Free Transform applies its box
+    /// before a new layer is made.
+    ///
+    /// Complete for the commands in [`PRECHECKED`]: there it accepts what `execute` accepts, but
+    /// for the group nesting limit (a test holds the two together). For others it checks only what they share.
+    pub fn precheck(&mut self, id: &str, params: &Value) -> Result<()> {
+        let spec = crate::commands::find(id).ok_or_else(|| EngineError::UnknownCommand(id.to_string()))?;
+        if !(params.is_object() || params.is_null()) {
+            return Err(EngineError::BadParams { cmd: id.to_string(), msg: "params must be a JSON object".into() });
+        }
+        crate::param_check::check(spec, params)?;
+        crate::filters::validate_params(id, params)?;
+        if id == "layer.new.layer" {
+            crate::new_layer::parse(params)?;
+        }
+        // A command that takes `"layer"` (an id or a name, as it resolves it) fails on one the
+        // document doesn't have.
+        if spec.params.contains("\"layer\":id")
+            && let Some(l) = commands::explicit_layer(self, params)?
+            && self.active().is_none_or(|st| st.doc.layer(l).is_none())
+        {
+            return Err(EngineError::BadParams { cmd: id.to_string(), msg: format!("no layer {}", l.0) });
+        }
+        self.admit(id, spec, params).map(|_| ())
+    }
+
+    /// What `dispatch` checks once the params are valid and a floating selection has dropped:
+    /// the precondition (on a named layer for commands that take one), a job running on the
+    /// document, a hidden target. The run params (the Channels panel's target filled in) when it
+    /// may run.
+    pub(crate) fn admit(&mut self, id: &str, spec: &commands::CommandSpec, params: &Value) -> Result<Value> {
+        let run_params = channel_cmds::inject_target(self, id, commands::inject_kind(id, params.clone()));
+        if let Err(why) = self.explicit_layer_enabled(spec, params).unwrap_or_else(|| self.precondition(spec, &run_params)) {
+            return Err(EngineError::Disabled(id.to_string(), why));
+        }
+        if let Some(why) = self.job_conflict(id, spec.journal) {
+            return Err(EngineError::Disabled(id.to_string(), why));
+        }
+        // Painting on or moving a hidden layer is refused, as in Photoshop (#571).
+        if let Some(why) = hidden_target::refusal(self, id, params) {
+            return Err(EngineError::Other(why.into()));
+        }
+        Ok(run_params)
+    }
+
     /// Is the command currently runnable? (drives menu enablement)
     pub fn is_enabled(&self, id: &str) -> bool {
         self.is_enabled_with(id, &Value::Null)
@@ -723,6 +785,10 @@ impl Session {
 
     /// Apply an undoable edit to the active document.
     pub fn edit<R>(&mut self, label: &str, f: impl FnOnce(&mut Document, &mut Option<LayerId>) -> Result<R>) -> Result<R> {
+        // Every mutation path (linked-file refresh, transform, place) re-renders smart objects
+        // through this entry; the requesting session's authority must reach those renders.
+        let _authorization = crate::jobs::render_authorization_scope(self.authorize);
+        let _document = crate::doc_path::scope(self.active().and_then(|d| d.path.as_deref()).map(std::path::Path::new));
         let restrict = self.color_restrict;
         let sampler_map = self.sampler_map.take();
         let st = self.active_mut().ok_or(EngineError::NoDocument)?;

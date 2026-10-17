@@ -816,33 +816,7 @@ fn conflict_state(overrides: &BTreeMap<String, String>, alternates: &BTreeMap<St
 /// quit): Edit › Keyboard Shortcuts won't assign them, as Photoshop won't. `sc` is in our
 /// notation, where `Cmd` is Ctrl off the Mac.
 pub fn reserved_shortcut(sc: &str) -> bool {
-    let Some(n) = prefs::normalize_shortcut(sc) else { return false };
-    let reserved: &[&str] = if cfg!(target_os = "macos") {
-        &["Cmd+Tab", "Cmd+Shift+Tab", "Cmd+Alt+Escape", "Cmd+`"]
-    } else if cfg!(target_os = "windows") {
-        &["Alt+Tab", "Alt+Shift+Tab", "Alt+F4", "Cmd+Alt+Delete", "Cmd+Escape", "Cmd+Shift+Escape"]
-    } else {
-        // Linux and the BSDs: window switching and closing, and the virtual consoles.
-        &[
-            "Alt+Tab",
-            "Alt+Shift+Tab",
-            "Alt+F4",
-            "Cmd+Alt+Delete",
-            "Cmd+Alt+F1",
-            "Cmd+Alt+F2",
-            "Cmd+Alt+F3",
-            "Cmd+Alt+F4",
-            "Cmd+Alt+F5",
-            "Cmd+Alt+F6",
-            "Cmd+Alt+F7",
-            "Cmd+Alt+F8",
-            "Cmd+Alt+F9",
-            "Cmd+Alt+F10",
-            "Cmd+Alt+F11",
-            "Cmd+Alt+F12",
-        ]
-    };
-    reserved.iter().filter_map(|r| prefs::normalize_shortcut(r)).any(|r| r == n)
+    prefs::reserved_shortcut(sc)
 }
 
 /// Text of a key press for the shortcut editor (`Cmd+Shift+K`), `None` for bare modifiers.
@@ -1079,7 +1053,9 @@ pub fn open_mismatch(app: &mut PhotocraftApp, message: &str, action: &str, missi
 pub fn body(app: &mut PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<String, Value>) {
     match f.get("__prefsui").and_then(Value::as_str).unwrap_or("") {
         "prefs" => {
-            f.insert("__gpuInfo".into(), json!(app.perf.gpu_info.lines()));
+            let mut info = app.perf.gpu_info.lines();
+            info.extend(gpu_memory_lines(app));
+            f.insert("__gpuInfo".into(), json!(info));
             let system = system_theme(app, ui.ctx());
             prefs_body(ui, f, system);
         }
@@ -1089,6 +1065,27 @@ pub fn body(app: &mut PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<String, Valu
         "mismatch" => mismatch_body(ui, f),
         _ => {}
     }
+}
+
+/// Performance › Graphics: the compositor's GPU memory budget and whether the active document's
+/// layers fit it (the GPU Memory preference sets it).
+fn gpu_memory_lines(app: &PhotocraftApp) -> Vec<String> {
+    let mut v = Vec::new();
+    if app.perf.gpu_budget_mb > 0 {
+        let budget = crate::chrome_ui::fmt_bytes(app.perf.gpu_budget_mb.saturating_mul(1 << 20));
+        v.push(crate::i18n::fmt(tl!("GPU memory budget: {budget}"), &[("budget", &budget)]));
+    }
+    let doc = app.session.active().map(|st| st.doc.id.0);
+    if let Some(fit) = app.perf.gpu_layer_fit.filter(|f| Some(f.doc) == doc) {
+        let args = [("needed", crate::chrome_ui::fmt_bytes(fit.needed)), ("budget", crate::chrome_ui::fmt_bytes(fit.budget))];
+        let args: Vec<(&str, &str)> = args.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        v.push(if fit.fits() {
+            crate::i18n::fmt(tl!("This document's layers: {needed} of {budget} for layers"), &args)
+        } else {
+            crate::i18n::fmt(tl!("This document's layers need {needed} but may hold {budget}: whole-document redraws use the CPU"), &args)
+        });
+    }
+    v
 }
 
 fn humanize(key: &str) -> String {
@@ -1124,6 +1121,10 @@ fn humanize(key: &str) -> String {
     // takes effect when the window next opens.
     if key == "lowLatencyDrawing" {
         return "Low-Latency Drawing (vsync off, applies at next launch)".into();
+    }
+    // Performance: the canvas compositor's GPU memory, 0 for the automatic budget (L3).
+    if key == "gpuMemoryMb" {
+        return "GPU Memory (MB, 0 = Automatic)".into();
     }
     let mut s = String::new();
     for (i, ch) in key.chars().enumerate() {

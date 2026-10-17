@@ -40,6 +40,7 @@ pub mod blocks;
 pub mod camera_raw_xmp;
 mod channel_map;
 pub mod comps_map;
+pub mod doc_path;
 pub mod effects_map;
 pub mod exr_parts;
 mod flat;
@@ -187,6 +188,9 @@ pub struct ExportOptions {
     /// File Compatibility (see [`PsdExportOptions::maximize_compatibility`]). On by default, as
     /// Photoshop's Always.
     pub psd_maximize_compatibility: bool,
+    /// The path of the document's own file, which linked smart objects that PSD/PSB and layered
+    /// TIFF embed are resolved against ([`doc_path::resolve`]).
+    pub document_path: Option<std::path::PathBuf>,
 }
 
 impl Default for ExportOptions {
@@ -199,6 +203,7 @@ impl Default for ExportOptions {
             tga_bits: None,
             image_previews: true,
             psd_maximize_compatibility: true,
+            document_path: None,
         }
     }
 }
@@ -275,7 +280,11 @@ fn import_stages(name: &str, bytes: &[u8], ctl: &photocraft_raster::Interrupt, m
     }
     if is_psd(bytes) {
         // A merged image the import reads is decoded with the parse: a ZIP one is inflated once.
-        let (file, merged) = PsdFile::from_bytes_and_merged(bytes, |f| psd_import::check_group_depth(f).is_ok() && psd_import::merged_needed(f))?;
+        let (file, merged) = PsdFile::from_bytes_and_merged_recovering(
+            bytes,
+            |f| psd_import::check_group_depth(f).is_ok() && psd_import::merged_needed(f),
+            psd_import::can_recover_layers,
+        )?;
         // Nesting past the document model's cap could never be saved; reject the file with the
         // actionable limit.
         psd_import::check_group_depth(&file)?;
@@ -407,7 +416,12 @@ fn export_stages(doc: &Document, name_or_ext: &str, opts: &ExportOptions, ctl: &
         return Ok(ExportResult { bytes: photocraft_format::save_to_bytes(doc.as_ref(), &previews)?, warnings: Vec::new() });
     }
     if ext == "psd" || ext == "psb" {
-        let o = PsdExportOptions { force_psb: opts.force_psb || ext == "psb", maximize_compatibility: opts.psd_maximize_compatibility, ..Default::default() };
+        let o = PsdExportOptions {
+            force_psb: opts.force_psb || ext == "psb",
+            maximize_compatibility: opts.psd_maximize_compatibility,
+            document_path: opts.document_path.clone(),
+            ..Default::default()
+        };
         let (mut file, mut warnings) = with_span(ctl, 0.0, PSD_MODEL_DONE, |ctl| psd_export::document_to_psd_interruptible(doc, &o, ctl));
         // A cancelled conversion stops early with an incomplete model: never write it.
         ctl.check().map_err(|_| IoError::Cancelled)?;

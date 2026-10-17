@@ -219,6 +219,29 @@ pub(crate) fn stem(path: &str) -> String {
     }
 }
 
+/// Whether `a` and `b` name the same file: the same text, or, when both exist, the same file on
+/// disk (a hard link, a different case on a case-insensitive volume, `./` or `..` in one of them).
+pub fn same_file(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let (Ok(x), Ok(y)) = (std::fs::metadata(a), std::fs::metadata(b)) {
+            return x.dev() == y.dev() && x.ino() == y.ino();
+        }
+    }
+    #[cfg(windows)]
+    {
+        // NTFS and FAT compare names without case.
+        if let (Ok(x), Ok(y)) = (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+            return x.to_string_lossy().to_lowercase() == y.to_string_lossy().to_lowercase();
+        }
+    }
+    false
+}
+
 pub(crate) fn join(dir: &str, name: &str) -> String {
     if dir.is_empty() {
         name.to_string()
@@ -340,6 +363,8 @@ pub(crate) fn encode(doc: &Document, path: &str, save: impl Into<SaveOpts>) -> R
         tga_bits: save.tga_bits,
         image_previews: save.image_previews,
         psd_maximize_compatibility: save.psd_maximize_compatibility,
+        // Linked files a PSD embeds are resolved against the document being worked on.
+        document_path: crate::doc_path::current(),
         ..Default::default()
     };
     // No quality chosen: write the file the way it was opened (a JPEG at its own quality, a WebP
@@ -578,7 +603,16 @@ fn place(s: &mut Session, p: &Value, linked: bool) -> Result<Value> {
     let cmd = if linked { "file.placeLinked" } else { "file.placeEmbedded" };
     let path = str_param(p, "path", cmd)?.to_string();
     let bytes = read_file(&path)?;
-    place_bytes(s, &path, bytes, linked.then(|| path.clone()), p)
+    // The link is stored absolute: a relative one would later be taken from the document's
+    // folder (`doc_path`), not the working directory the path was given in.
+    let link = linked.then(|| {
+        if std::path::Path::new(&path).is_relative() {
+            std::path::absolute(&path).map_or_else(|_| path.clone(), |a| a.to_string_lossy().into_owned())
+        } else {
+            path.clone()
+        }
+    });
+    place_bytes(s, &path, bytes, link, p)
 }
 
 // ---------- File Info (XMP) ----------

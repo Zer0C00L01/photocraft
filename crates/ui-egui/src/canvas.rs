@@ -15,6 +15,13 @@ use crate::state::{Tool, View};
 /// Largest texture side we upload; bigger documents display downsampled until the GPU path lands.
 pub const MAX_TEXTURE: u32 = 4096;
 
+/// The largest texture side to upload on this device: [`MAX_TEXTURE`], or less where the GPU
+/// allows less (2048 on some older or low-end GPUs and WebGL contexts). Past the device's limit
+/// egui asserts and the backend fails to create the texture.
+fn texture_side(ctx: &egui::Context) -> u32 {
+    u32::try_from(ctx.input(|i| i.max_texture_side)).unwrap_or(MAX_TEXTURE).clamp(1, MAX_TEXTURE)
+}
+
 pub(crate) struct ClonePreviewCache {
     key: String,
     texture: egui::TextureHandle,
@@ -1421,7 +1428,7 @@ pub fn ensure_texture(app: &mut PhotocraftApp, ctx: &egui::Context, idx: usize, 
     if cache.tex_revision != revision || cache.texture.is_none() || cache.tex_preview_key != preview_key {
         let t0 = crate::gpu_canvas::now_ms();
         let longest = doc.size.width.max(doc.size.height);
-        let factor = longest.div_ceil(MAX_TEXTURE).max(1);
+        let factor = longest.div_ceil(texture_side(ctx)).max(1);
         let (w, h) = ((doc.size.width / factor).max(1), (doc.size.height / factor).max(1));
         let current = cache.texture.as_mut().filter(|t| t.size() == [w as usize, h as usize]);
         if let (Some(d), Some(t)) = (damage, current) {
@@ -1608,7 +1615,21 @@ fn ensure_gpu(app: &mut PhotocraftApp, ctx: &egui::Context, idx: usize, visible:
         grid: None,
     });
     let present = cache.on_gpu && gpu.has(id.0, size);
-    if present && cache.revision == revision && cache.preview_key == preview_key {
+    let current = cache.revision == revision && cache.preview_key == preview_key;
+    // GPU Memory or Memory Usage changed with nothing to redraw: the new budget, and whether the
+    // layers fit it, show at once (the status bar's GPU Memory Full).
+    if present && app.perf.gpu_budget_allowance != budget_allowance(app) {
+        gpu_budget(app, &gpu, idx, false, visible);
+    }
+    // Switched to a document whose canvas is already current: size the budget for it and measure
+    // whether its layers fit, so GPU Memory Full shows (or clears) at once rather than at its
+    // next full refresh. Once per switch: the fit then names this document.
+    if present && app.perf.gpu_layer_fit.is_none_or(|f| f.doc != id.0) {
+        gpu_budget(app, &gpu, idx, false, visible);
+        let fit = gpu.measure_fit(&doc).unwrap_or(crate::gpu_canvas::LayerFit { doc: id.0, needed: 0, budget: 0 });
+        app.perf.gpu_layer_fit = Some(fit);
+    }
+    if present && current {
         // An adjustment preview composited where the view was: catch up where it moved to.
         if let Some(r) = crate::adjust_preview::uncovered(app, id, raw_key, visible) {
             let r = gpu.refresh(id.0, &doc, Some(r), display.as_deref());
@@ -1620,12 +1641,17 @@ fn ensure_gpu(app: &mut PhotocraftApp, ctx: &egui::Context, idx: usize, visible:
     // draws it (checked before the memory budget, which walks the history, every frame).
     if !gpu.fits_canvas(&doc) {
         crate::background_redraw::cancel(app, id);
+        // Drawn on the CPU canvas: no layer budget applies to it.
+        if app.perf.gpu_layer_fit.is_some_and(|f| f.doc == id.0) {
+            app.perf.gpu_layer_fit = None;
+        }
         return false;
     }
     let partial = present && damage.is_some();
     gpu_budget(app, &gpu, idx, partial, visible);
     let defer = crate::background_redraw::enabled(app);
     let r = gpu.refresh_with(id.0, &doc, if partial { damage } else { None }, display.as_deref(), defer);
+    app.perf.gpu_layer_fit = gpu.layer_fit();
     if r.kind == "lost" || r.kind == crate::gpu_canvas::REFRESH_OVER_BUDGET {
         // The device is gone (`gpu_status` then drops the GPU canvas) or the canvas is over the
         // texture budget: draw this frame on the CPU path.
@@ -1666,21 +1692,53 @@ fn ensure_gpu(app: &mut PhotocraftApp, ctx: &egui::Context, idx: usize, visible:
     true
 }
 
-/// Point the wgpu compositor at what the view shows, and size its memory budget from Memory
-/// Usage, the document's pixels and History, and physical memory: on full refreshes (pixels
-/// counted once per structural change, not per brush dab) and whenever the preference changes.
+/// Point the wgpu compositor at what the view shows, and size its memory budget from GPU Memory,
+/// or Memory Usage, the document's pixels and History (charged where the GPU shares the system's
+/// memory), physical memory and the GPU's own: on full refreshes (pixels counted once per
+/// structural change, not per brush dab) and whenever either preference changes.
 fn gpu_budget(app: &mut PhotocraftApp, gpu: &crate::gpu_canvas::GpuCanvas, idx: usize, partial: bool, visible: DRect) {
     gpu.set_focus(Some(visible));
-    let allowance = u64::from(app.session.prefs().performance.memory_usage_mb).saturating_mul(1 << 20);
-    if partial && app.perf.gpu_budget_allowance == allowance && gpu.memory_budget().is_some() {
+    let allowance = budget_allowance(app);
+    let changed = app.perf.gpu_budget_allowance != allowance;
+    if partial && !changed && gpu.memory_budget().is_some() {
         return;
     }
     let Some(st) = app.session.documents().get(idx) else { return };
     let pixels = st.memory_bytes() as u64;
-    let budget = crate::gpu_canvas::memory_budget(allowance, pixels, crate::gpu_canvas::physical_memory());
+    let budget = crate::gpu_canvas::memory_budget(allowance.0, pixels, crate::gpu_canvas::physical_memory(), gpu.video_memory(), allowance.1);
     gpu.set_memory_budget(budget);
     app.perf.gpu_budget_mb = budget >> 20;
     app.perf.gpu_budget_allowance = allowance;
+    if changed && let Some(fit) = gpu.measure_fit(&st.doc) {
+        app.perf.gpu_layer_fit = Some(fit);
+    }
+}
+
+/// Memory Usage and GPU Memory (Preferences › Performance), in bytes.
+fn budget_allowance(app: &PhotocraftApp) -> (u64, u64) {
+    let performance = &app.session.prefs().performance;
+    (u64::from(performance.memory_usage_mb).saturating_mul(1 << 20), u64::from(performance.gpu_memory_mb).saturating_mul(1 << 20))
+}
+
+/// The proxy factor of a live preview of filter `cmd` with `params` on `doc`, the active document:
+/// reduced on a large document (Preferences › Performance › Low Resolution Previews), except for
+/// filters whose features don't scale with a proxy (#2063), and never coarser than the active view,
+/// so at 100 % the preview shows every pixel instead of k-pixel blocks (#6326, as adjustment
+/// previews have since #5764). Zoomed out, the proxy keeps previews of large documents fast.
+///
+/// The in-dialog preview window ([`crate::filter_preview_ui`]) sizes its own textures from this
+/// too, so the canvas and the window never disagree about the factor.
+///
+/// Full resolution costs a whole filter per parameter change, which only the background worker
+/// absorbs. The web build has no worker and computes the preview inline on the UI thread (#1676),
+/// where that would freeze the page: there the document's proxy stands. The test and
+/// `PHOTOCRAFT_INLINE_JOBS` inline paths keep the cap deliberately, because `background_jobs` is
+/// flipped mid-session (a shell save during `actions.play`): a factor that followed it would change
+/// [`crate::filter_dialog::FilterPreviewKey`] under a finished preview and recompute it inline,
+/// the very stall this avoids.
+pub(crate) fn filter_preview_factor(app: &PhotocraftApp, doc: &Document, cmd: &str, params: &serde_json::Value) -> u32 {
+    let k = crate::filter_dialog::preview_factor(cmd, params, crate::proxy::preview_factor(doc, crate::proxy::reduced_previews(app)));
+    if cfg!(target_arch = "wasm32") { k } else { crate::proxy::view_factor(k, app.current_zoom()) }
 }
 
 /// Live preview for an open filter dialog: run the filter on the proxy and upload it. With
@@ -1714,8 +1772,7 @@ pub(crate) fn ensure_filter_preview(app: &mut PhotocraftApp, idx: usize, ctx: &e
         params = crate::select_mask_view::request_params(&d.fields, params);
     }
     let st = app.session.documents().get(idx)?;
-    // Filters whose features don't scale with a proxy preview at full resolution (#2063).
-    let k = crate::filter_dialog::preview_factor(&cmd, &params, crate::proxy::preview_factor(&st.doc, crate::proxy::reduced_previews(app)));
+    let k = filter_preview_factor(app, &st.doc, &cmd, &params);
     let request = crate::filter_dialog::FilterPreviewKey {
         doc: st.doc.id,
         revision: st.revision,
@@ -4054,6 +4111,8 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
     if primary && hand_pan && response.dragged() {
         crate::transform_tool::draw_content(app, &painter, &xf);
         crate::transform_tool::draw_overlay(app, &painter, &xf);
+        // The Pen's path in progress survives a Space pan, and stays on screen through it (#6592).
+        crate::vector_ui::draw_overlay(app, &painter, &xf, &doc);
     }
     app.tool_override = None;
     if let Some(b) = layer_edges_rect(app, idx) {
@@ -4520,8 +4579,8 @@ fn draw_beyond_canvas(app: &mut PhotocraftApp, painter: &egui::Painter, xf: &Vie
         None => {
             let t0 = crate::gpu_canvas::now_ms();
             let extent = photocraft_engine::extra_cmds::reveal_all_bounds(&doc);
-            // One texel per `k` document pixels keeps every texture within MAX_TEXTURE.
-            let k = extent.width().max(extent.height()).div_ceil(MAX_TEXTURE).max(1);
+            // One texel per `k` document pixels keeps every texture within the device's side.
+            let k = extent.width().max(extent.height()).div_ceil(texture_side(&ctx)).max(1);
             let proxy = (k > 1).then(|| photocraft_compose::proxy::proxy_document(&doc, k));
             let src = proxy.as_ref().unwrap_or(&*doc);
             let k = k as i32;
@@ -5459,6 +5518,7 @@ pub fn tool_event(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers)
             {
                 e.dragging = false;
                 e.resize = None;
+                app.ui.caret_blink_time = app.last_frame_time;
             }
             if tool == Tool::Pen {
                 crate::vector_ui::pen_up(app);
@@ -5806,14 +5866,12 @@ pub(crate) fn finish_gesture(app: &mut PhotocraftApp, d: Drag) {
                 let _ = app.run("select.deselect", json!({}));
             }
         }
-        Tool::Gradient => {
-            if (end[0] - d.start[0]).abs() + (end[1] - d.start[1]).abs() >= 2.0 {
-                let o = app.ui.tool_options.clone();
-                let _ = app.run(
-                    "paint.gradient",
-                    json!({"from": [d.start[0], d.start[1]], "to": [end[0], end[1]], "style": o.gradient_style, "reverse": o.gradient_reverse, "dither": o.gradient_dither, "opacity": o.fill_opacity, "mode": o.gradient_blend_mode.label(), "target": paint_target(app)}),
-                );
-            }
+        Tool::Gradient if (end[0] - d.start[0]).abs() + (end[1] - d.start[1]).abs() >= 2.0 => {
+            let o = app.ui.tool_options.clone();
+            let _ = app.run(
+                "paint.gradient",
+                json!({"from": [d.start[0], d.start[1]], "to": [end[0], end[1]], "style": o.gradient_style, "reverse": o.gradient_reverse, "dither": o.gradient_dither, "opacity": o.fill_opacity, "mode": o.gradient_blend_mode.label(), "target": paint_target(app)}),
+            );
         }
         Tool::Move => {
             let (dx, dy) = ((end[0] - d.start[0]).round(), (end[1] - d.start[1]).round());
@@ -6068,6 +6126,59 @@ mod tests {
         let d = color.canvas_display(&doc).unwrap();
         assert!(!d.is_identity());
         assert_eq!(super::display_image(Some(&d), &buf).pixels, reference(d.to_rgba8(&buf)).pixels);
+    }
+
+    /// #6326: a filter's live preview is never coarser than the screen. On a document big enough
+    /// for a reduced proxy, the view at 100 % previews at full resolution, and only a view zoomed
+    /// out far enough uses the proxy. Through `ensure_filter_preview`, so the factor the canvas
+    /// actually requests is the one under test.
+    #[test]
+    fn filter_preview_at_100_percent_is_full_resolution() {
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        app.background_jobs = false;
+        app.run("file.new", json!({"width": 2400, "height": 2200})).unwrap();
+        assert_eq!(crate::proxy::preview_factor(&app.session.active().unwrap().doc, true), 2, "big enough for a proxy");
+        crate::filter_dialog::open(&mut app, "filter.stylize.solarize").unwrap();
+        let ctx = egui::Context::default();
+        let preview_at = |app: &mut PhotocraftApp, zoom: f32| {
+            app.ui.views.get_mut(0).expect("the new document's view").zoom = zoom;
+            assert_eq!(app.current_zoom(), zoom);
+            let (k, _, size) = ensure_filter_preview(app, 0, &ctx).expect("a preview");
+            (k, size)
+        };
+        assert_eq!(preview_at(&mut app, 1.0), (1, [2400, 2200]), "100 %: every pixel");
+        assert_eq!(preview_at(&mut app, 0.25), (2, [1200, 1100]), "zoomed out: the document's proxy");
+        // Low Resolution Previews off: full resolution at any zoom, exactly as before #6326.
+        app.run("prefs.set", json!({"path": "performance.lowResolutionPreviews", "value": false})).unwrap();
+        assert_eq!(preview_at(&mut app, 0.25), (1, [2400, 2200]), "the preference still decides");
+    }
+
+    /// The factor itself over the zoom range, and that Preferences › Performance › Low
+    /// Resolution Previews still decides whether there is a proxy at all (#6326).
+    #[test]
+    fn filter_preview_factor_caps_at_the_view_without_overriding_the_preference() {
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        // 9 MP: reduced previews halve it (empty tiles, so nothing is allocated).
+        app.run("file.new", json!({"width": 3000, "height": 3000, "background": "transparent"})).unwrap();
+        let doc = app.session.active().unwrap().doc.clone();
+        let params = json!({"amount": 100, "radius": 4.0, "threshold": 0});
+        let k = |app: &mut PhotocraftApp, zoom: f32| {
+            app.ui.views.get_mut(0).expect("the new document's view").zoom = zoom;
+            super::filter_preview_factor(app, &doc, "filter.sharpen.unsharpMask", &params)
+        };
+        assert_eq!(k(&mut app, 0.25), 2, "zoomed out the preview stays reduced");
+        assert_eq!(k(&mut app, 0.5), 2);
+        assert_eq!(k(&mut app, 0.75), 1, "past the proxy's resolution it shows every pixel");
+        assert_eq!(k(&mut app, 1.0), 1);
+        assert_eq!(k(&mut app, 4.0), 1);
+        // A corrupt or unset zoom must not pick a coarser proxy than the document's own.
+        assert_eq!(k(&mut app, f32::NAN), 1);
+        assert_eq!(k(&mut app, 0.0), 1);
+        // Low Resolution Previews off: full resolution at any zoom, the cap a no-op.
+        app.run("prefs.set", json!({"path": "performance.lowResolutionPreviews", "value": false})).unwrap();
+        for zoom in [0.1, 0.25, 1.0, 4.0] {
+            assert_eq!(k(&mut app, zoom), 1, "zoom {zoom}");
+        }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -6525,6 +6636,25 @@ mod tests {
         assert_eq!(uploads(&ctx), vec![(true, crisp)], "a partial update keeps the crisp sampling");
     }
 
+    /// A device that allows smaller textures than MAX_TEXTURE (2048 on some older GPUs and WebGL
+    /// contexts, and on the fallback adapter the GPU tests sometimes get under load): the canvas
+    /// texture is reduced to fit it. A 2600 px document was uploaded at full size, which egui
+    /// asserts on and the backend can't create.
+    #[test]
+    fn cpu_canvas_texture_fits_the_device_limit() {
+        for (side, (w, h), want) in [(2048, (2600, 1700), [1300, 850]), (2048, (5000, 2000), [1666, 666]), (8192, (5000, 2000), [2500, 1000])] {
+            let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), Default::default());
+            app.run("file.new", json!({"width": w, "height": h})).unwrap();
+            let ctx = egui::Context::default();
+            ctx.input_mut(|i| i.max_texture_side = side);
+            let (tex, _) = ensure_texture(&mut app, &ctx, 0, None).unwrap();
+            let mut delta = ctx.tex_manager().write().take_delta();
+            let sizes: Vec<_> = delta.set.get(&tex).into_iter().flatten().map(|d| d.image.size()).collect();
+            delta.clear();
+            assert_eq!(sizes, vec![want], "{w}x{h} on a {side} px device");
+        }
+    }
+
     #[test]
     fn cpu_canvas_of_a_reduced_document_stays_bilinear() {
         // Over MAX_TEXTURE the texture holds one texel per `factor` pixels: a texel is not a
@@ -6542,6 +6672,7 @@ mod tests {
 
     #[test]
     fn gpu_display_luts_are_per_display() {
+        let _gpu = photocraft_testkit::gpu_lock();
         let Ok(rs) = std::panic::catch_unwind(|| egui_kittest::wgpu::create_render_state(crate::gpu_canvas::wgpu_setup(), Default::default())) else {
             eprintln!("skipping: no GPU adapter");
             return;
@@ -7460,6 +7591,7 @@ mod tests {
         // must update only the reduced pixels it touched.
         let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), Default::default());
         let ctx = egui::Context::default();
+        ctx.input_mut(|i| i.max_texture_side = 8192);
         app.run("file.new", json!({"width": 4097, "height": 90, "background": "transparent"})).unwrap();
         let tilt = json!({"size": 30, "hardness": 1.0, "spacing": 0.05, "shapeDynamics": {"enabled": true, "size": {"control": "penTilt"}}});
         app.run("tools.setBrush", json!({ "brush": tilt })).unwrap();
