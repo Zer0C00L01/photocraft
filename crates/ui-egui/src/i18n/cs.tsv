@@ -20,6 +20,7 @@
 # dialog commands is kept.
 
 # Channel Options and New Spot Channel (#3761)
+	DTF Spot Channel…	DTF Kanál přímé barvy…
 	Channel Color	Barva kanálu
 	Color Indicates:	Barva označuje:
 	Solidity:	Plnost:
@@ -3838,3 +3839,8 @@ navigator	Zoom	Zvětšení
 	Increase Brush Size	Zvětšit velikost štětce
 	Decrease Brush Hardness	Snížit tvrdost štětce
 	Increase Brush Hardness	Zvýšit tvrdost štětce
+
+	Playback Options	Možnosti přehrávání
+	Accelerated	Zrychlené
+	Step by Step	Krok za krokem
+	Pause For	Pozastavit na

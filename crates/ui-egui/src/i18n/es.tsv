@@ -13,6 +13,7 @@
 # letters; the trailing "…" of dialog commands is kept.
 
 # Channel Options and New Spot Channel (#3761)
+	DTF Spot Channel…	DTF Canal de tinta plana…
 	Channel Color	Color del canal
 	Color Indicates:	El color indica:
 	Solidity:	Solidez:
@@ -4192,3 +4193,8 @@ navigator	Zoom	Zoom
 	Increase Brush Size	Aumentar tamaño del pincel
 	Decrease Brush Hardness	Reducir dureza del pincel
 	Increase Brush Hardness	Aumentar dureza del pincel
+
+	Playback Options	Opciones de reproducción
+	Accelerated	Acelerada
+	Step by Step	Paso a paso
+	Pause For	Pausa de

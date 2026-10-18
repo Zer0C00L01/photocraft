@@ -4084,6 +4084,7 @@ cameraRaw	Yellow	Sárga
 	ICO is limited to 256 × 256 pixels	Az ICO legfeljebb 256 × 256 képpont lehet
 
 # Channel Options and New Spot Channel (#3761)
+	DTF Spot Channel…	DTF Direktszín-csatorna…
 	Channel Color	Csatorna színe
 	Color Indicates:	A szín jelzése:
 	Ink Characteristics	Festék jellemzői
@@ -4149,3 +4150,8 @@ cameraRaw	Yellow	Sárga
 	Increase Brush Size	Ecsetméret növelése
 	Decrease Brush Hardness	Ecsetkeménység csökkentése
 	Increase Brush Hardness	Ecsetkeménység növelése
+
+	Playback Options	Lejátszási beállítások
+	Accelerated	Gyorsított
+	Step by Step	Lépésenként
+	Pause For	Szünet ennyi ideig

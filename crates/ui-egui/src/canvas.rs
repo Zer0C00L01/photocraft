@@ -3325,7 +3325,8 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
     if !under_dialog && ctx.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| rect.contains(p))) {
         crate::spring_tools::note_canvas_press(app);
     }
-    // Navigation (wheel_nav.rs): scroll pans (⇧ or ⌘/Ctrl sideways); pinch and ⌥-scroll zoom around the pointer.
+    // Navigation (wheel_nav.rs): scroll pans (⇧ or Mac ⌘ sideways); pinch, ⌥-scroll and Ctrl+notch
+    // zoom around the pointer; ⇧+Ctrl snaps to the zoom ladder.
     // The wheel also scrolls over the scrollbars drawn on top of the canvas (last frame's hover).
     let bars_id = egui::Id::new(("pc-canvas-bars-hover", idx));
     let over_bars = ctx.data(|d| d.get_temp::<bool>(bars_id)).unwrap_or(false);
@@ -4426,7 +4427,7 @@ pub(crate) fn marching_ants_lines(painter: &egui::Painter, lines: impl Iterator<
     };
     for (pa, pb) in lines {
         // A transformed outline can land anywhere, or nowhere (a point on a Distort's horizon).
-        if !(pa.is_finite() && pb.is_finite()) || !clip.intersects(Rect::from_two_pos(pa, pb).expand(1.0)) {
+        if !(pa.is_finite() && pb.is_finite() && clip.intersects(Rect::from_two_pos(pa, pb).expand(1.0))) {
             continue;
         }
         let (pa, pb) = if pa.distance(pb) > LONG {

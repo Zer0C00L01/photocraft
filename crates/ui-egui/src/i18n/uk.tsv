@@ -9,6 +9,7 @@
 # Licensed MIT OR Apache-2.0. See LICENSE-translations.txt and ATTRIBUTION.md.
 
 # Channel Options and New Spot Channel (#3761)
+	DTF Spot Channel…	DTF Канал плашкового кольору…
 	Channel Color	Колір каналу
 	Color Indicates:	Кольором позначено:
 	Solidity:	Щільність:
@@ -3938,3 +3939,8 @@ curves	Smooth	Згладити
 	This shape layer must be rasterized before proceeding. It will no longer be editable as a shape. Rasterize the shape?	Щоб продовжити, потрібно растеризувати цей шар фігури. Після цього його більше не можна буде редагувати як фігуру. Растеризувати фігуру?
 	This Smart Object must be rasterized before proceeding. Its contents will no longer be editable. Rasterize the Smart Object?	Щоб продовжити, потрібно растеризувати цей смартоб’єкт. Після цього його вміст більше не можна буде редагувати. Растеризувати смартоб’єкт?
 	This fill layer must be rasterized before proceeding. Its fill content will no longer be editable. Rasterize the layer?	Щоб продовжити, потрібно растеризувати цей шар заливки. Після цього його заливку більше не можна буде редагувати. Растеризувати шар?
+
+	Playback Options	Параметри відтворення
+	Accelerated	Прискорене
+	Step by Step	Покрокове
+	Pause For	Пауза на

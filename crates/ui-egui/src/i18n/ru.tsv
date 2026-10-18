@@ -18,6 +18,7 @@
 # the Russian typographic equivalent, with the space the source carries.
 
 # Channel Options and New Spot Channel (#3761)
+	DTF Spot Channel…	DTF Канал плашечного цвета…
 	Channel Color	Цвет канала
 	Color Indicates:	Цветом обозначены:
 	Solidity:	Плотность:
@@ -3203,3 +3204,8 @@ curves	Smooth	Сгладить
 	Increase Brush Size	Увеличить размер кисти
 	Decrease Brush Hardness	Уменьшить жёсткость кисти
 	Increase Brush Hardness	Увеличить жёсткость кисти
+
+	Playback Options	Параметры воспроизведения
+	Accelerated	Ускоренное
+	Step by Step	Пошаговое
+	Pause For	Пауза на

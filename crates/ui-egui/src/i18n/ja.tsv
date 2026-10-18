@@ -16,6 +16,7 @@
 # letters; the trailing "…" of dialog commands is kept.
 
 # Channel Options and New Spot Channel (#3761)
+	DTF Spot Channel…	DTF スポットチャンネル…
 	Channel Color	チャンネルカラー
 	Color Indicates:	着色表示:
 	Solidity:	濃度:
@@ -3907,3 +3908,8 @@ curves	Smooth	スムーズ
 	Increase Brush Size	ブラシサイズを大きく
 	Decrease Brush Hardness	ブラシの硬さを下げる
 	Increase Brush Hardness	ブラシの硬さを上げる
+
+	Playback Options	再生オプション
+	Accelerated	高速
+	Step by Step	ステップ単位
+	Pause For	一時停止

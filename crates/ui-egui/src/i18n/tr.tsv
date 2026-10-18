@@ -3895,6 +3895,7 @@ cameraData	Lens	Lens
 	ICO is limited to 256 × 256 pixels	ICO 256 × 256 piksel ile sınırlıdır
 
 # Channel Options and New Spot Channel (#3761)
+	DTF Spot Channel…	DTF Spot Kanal…
 	Channel Color	Kanal Rengi
 	Color Indicates:	Rengin Gösterdiği:
 	Ink Characteristics	Mürekkep Özellikleri
@@ -3960,3 +3961,8 @@ cameraData	Lens	Lens
 	Increase Brush Size	Fırça boyutunu büyüt
 	Decrease Brush Hardness	Fırça sertliğini azalt
 	Increase Brush Hardness	Fırça sertliğini artır
+
+	Playback Options	Oynatma Seçenekleri
+	Accelerated	Hızlandırılmış
+	Step by Step	Adım adım
+	Pause For	Şu kadar duraklat

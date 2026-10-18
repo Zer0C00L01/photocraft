@@ -12,6 +12,7 @@
 # Product and technology names retain their spelling. See docs/localization-zh-hans.md.
 
 # Channel Options and New Spot Channel (#3761)
+	DTF Spot Channel…	DTF 专色通道…
 	Channel Color	通道颜色
 	Color Indicates:	色彩指示：
 	Solidity:	密度：
@@ -2852,3 +2853,8 @@ curves	Smooth	平滑
 	Increase Brush Size	增大画笔大小
 	Decrease Brush Hardness	减小画笔硬度
 	Increase Brush Hardness	增大画笔硬度
+
+	Playback Options	回放选项
+	Accelerated	加速
+	Step by Step	逐步
+	Pause For	暂停

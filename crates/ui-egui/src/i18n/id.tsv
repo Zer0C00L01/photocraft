@@ -13,6 +13,7 @@
 # letters; the trailing "…" of dialog commands is kept.
 
 # Channel Options and New Spot Channel (#3761)
+	DTF Spot Channel…	DTF Spot Channel…
 	Channel Color	Warna Saluran
 	Color Indicates:	Warna Menunjukkan:
 	Solidity:	Soliditas:
@@ -3225,3 +3226,8 @@ curves	Smooth	Haluskan
 	Increase Brush Size	Perbesar ukuran kuas
 	Decrease Brush Hardness	Kurangi kekerasan kuas
 	Increase Brush Hardness	Tambah kekerasan kuas
+
+	Playback Options	Opsi pemutaran
+	Accelerated	Dipercepat
+	Step by Step	Langkah demi langkah
+	Pause For	Jeda selama

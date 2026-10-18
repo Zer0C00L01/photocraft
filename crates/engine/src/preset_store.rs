@@ -1123,6 +1123,10 @@ impl Session {
             }
             self.actions.rev = self.actions.rev.saturating_add(1).max(1);
         }
+        // The built-in DTF action is appended when the user doesn't already have one, then
+        // saved with the rest of the list. A file that failed to load stays unread: sync
+        // refuses to overwrite it.
+        crate::dtf_cmds::ensure_preset(self);
         self.brush_presets_changed();
         self.sync_preset_store();
         // A brush remembered from the previous run (or picked before the store loaded) may be

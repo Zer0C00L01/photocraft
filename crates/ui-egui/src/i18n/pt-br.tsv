@@ -16,6 +16,7 @@
 # stay as they are; the trailing "…" of dialog commands is kept.
 
 # Channel Options and New Spot Channel (#3761)
+	DTF Spot Channel…	DTF Canal de cor especial…
 	Channel Color	Cor do canal
 	Color Indicates:	A cor indica:
 	Solidity:	Solidez:
@@ -4020,3 +4021,8 @@ layerLabel	No Color	Sem cor
 	Increase Brush Size	Aumentar tamanho do pincel
 	Decrease Brush Hardness	Diminuir dureza do pincel
 	Increase Brush Hardness	Aumentar dureza do pincel
+
+	Playback Options	Opções de reprodução
+	Accelerated	Acelerada
+	Step by Step	Passo a passo
+	Pause For	Pausar por

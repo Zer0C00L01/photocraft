@@ -20,6 +20,7 @@
 # dialog commands is kept.
 
 # Channel Options and New Spot Channel (#3761)
+	DTF Spot Channel…	DTF Canal de ton direct…
 	Channel Color	Couleur de la couche
 	Color Indicates:	La couleur indique :
 	Solidity:	Solidité :
@@ -3238,3 +3239,8 @@ curves	Smooth	Lisser
 	Increase Brush Size	Augmenter la taille du pinceau
 	Decrease Brush Hardness	Réduire la dureté du pinceau
 	Increase Brush Hardness	Augmenter la dureté du pinceau
+
+	Playback Options	Options d'exécution
+	Accelerated	Accélérée
+	Step by Step	Pas à pas
+	Pause For	Pause de
