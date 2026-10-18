@@ -26,11 +26,24 @@ pub struct ActionsUi {
     /// Photoshop's Button Mode: each action is a coloured button, and a click plays it.
     #[serde(default)]
     pub button_mode: bool,
+    /// Next step when Playback Options is step or pause: `(action index, step index)`.
+    #[serde(skip)]
+    step_from: Option<(usize, usize)>,
+    /// When Pause For is waiting to play the next step.
+    #[serde(skip)]
+    pause_resume: Option<PauseResume>,
     #[serde(skip)]
     reveal_recording: Option<(usize, usize)>,
     /// The action whose name is being edited in place (double-click on its name).
     #[serde(skip)]
     renaming: Option<RenameAction>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PauseResume {
+    action: usize,
+    from: usize,
+    at: std::time::Instant,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -96,11 +109,17 @@ pub(crate) fn assign_shortcut(app: &mut PhotocraftApp, name: &str, shortcut: &st
 /// Engine steps keep the headless action semantics (no dialogs or background jobs).
 pub(crate) fn play(app: &mut PhotocraftApp, params: &Value) -> Result<Value, String> {
     let (action, from) = actions_cmds::playback_plan(&app.session, params).map_err(|e| e.to_string())?;
+    let limit = actions_cmds::play_limit(params).map_err(|e| e.to_string())?;
     let recording = actions_cmds::begin_playback(&mut app.session, &action).map_err(|e| e.to_string())?;
     let mut ran = 0u64;
     let mut failed = None;
     let mut paused = None;
+    let mut next = action.steps.len();
     for (i, (id, p)) in action.enabled_steps().skip_while(|(i, _)| *i < from) {
+        if limit.is_some_and(|n| ran >= n as u64) {
+            next = i;
+            break;
+        }
         // The dialog toggle: show the step's dialog with its recorded values and continue
         // from the next step when it is confirmed (`resume`). Agents play headlessly.
         if action.dialogs.contains(&i) && !app.automation_input && (crate::filter_dialog::has_dialog(id) || crate::adjust_dialog::has_dialog(id)) {
@@ -113,6 +132,7 @@ pub(crate) fn play(app: &mut PhotocraftApp, params: &Value) -> Result<Value, Str
                 d.fields.insert(RESUME.into(), json!({"action": action.name, "from": i + 1}));
             }
             paused = Some(json!({"step": i, "id": id, "dialog": dialog}));
+            next = i;
             break;
         }
         let result = (|| {
@@ -139,27 +159,70 @@ pub(crate) fn play(app: &mut PhotocraftApp, params: &Value) -> Result<Value, Str
             Ok(value) => {
                 if let Some(error) = actions_cmds::nested_failure(id, &value) {
                     failed = Some(json!({"step": i, "id": id, "error": error}));
+                    next = i;
                     break;
                 }
                 if let Some(inner) = value.get("paused").filter(|p| p.is_object()) {
                     // A called action paused for a dialog; it resumes alone when confirmed.
                     paused = Some(inner.clone());
+                    next = i;
                     break;
                 }
                 ran += 1;
             }
             Err(error) => {
                 failed = Some(json!({"step": i, "id": id, "error": error}));
+                next = i;
                 break;
             }
         }
     }
     actions_cmds::finish_playback(&mut app.session, recording, &action, from);
-    Ok(match (failed, paused) {
+    let mut out = match (failed, paused) {
         (Some(f), _) => json!({"action": action.name, "ran": ran, "failed": f}),
         (None, Some(p)) => json!({"action": action.name, "ran": ran, "paused": p}),
         (None, None) => json!({"action": action.name, "ran": ran}),
-    })
+    };
+    if let Some(obj) = out.as_object_mut() {
+        if limit.is_some() {
+            obj.insert("next".into(), json!(next));
+        }
+        if app.session.actions.playback_mode() == "pause" {
+            obj.insert("pauseSeconds".into(), json!(app.session.actions.pause_seconds()));
+        }
+    }
+    Ok(out)
+}
+
+fn pause_duration(seconds: f64) -> std::time::Duration {
+    let seconds = if seconds.is_finite() && seconds > 0.0 { seconds.min(60.0) } else { 1.0 };
+    std::time::Duration::try_from_secs_f64(seconds).unwrap_or(std::time::Duration::from_secs(1))
+}
+
+/// Remember where step-by-step and Pause For continue. A finished action or a dialog pause clears the wait.
+fn note_playback(app: &mut PhotocraftApp, action: usize, v: &Value) {
+    let mode = app.session.actions.playback_mode().to_string();
+    if mode == "accelerated" || v.get("failed").is_some() || v.get("paused").is_some() {
+        if mode == "accelerated" {
+            app.ui.actions.step_from = None;
+        }
+        app.ui.actions.pause_resume = None;
+        return;
+    }
+    let len = app.session.actions.list.get(action).map(|a| a.steps.len()).unwrap_or(0);
+    let next = v.get("next").and_then(Value::as_u64).and_then(|n| usize::try_from(n).ok()).unwrap_or(len);
+    if next >= len {
+        app.ui.actions.step_from = None;
+        app.ui.actions.pause_resume = None;
+        return;
+    }
+    app.ui.actions.step_from = Some((action, next));
+    if mode == "pause" {
+        let wait = pause_duration(app.session.actions.pause_seconds());
+        app.ui.actions.pause_resume = Some(PauseResume { action, from: next, at: std::time::Instant::now() + wait });
+    } else {
+        app.ui.actions.pause_resume = None;
+    }
 }
 
 /// Execute the actual menu command, not a synthetic keystroke. Fit is deferred
@@ -667,6 +730,17 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     let mut save_set: Option<String> = None;
     let max_h = (ui.available_height() - 38.0).max(0.0);
     let mut play_idx = None;
+    if let Some(resume) = app.ui.actions.pause_resume {
+        if app.session.actions.playback_mode() != "pause" {
+            app.ui.actions.pause_resume = None;
+        } else if std::time::Instant::now() >= resume.at {
+            app.ui.actions.pause_resume = None;
+            app.ui.actions.step_from = Some((resume.action, resume.from));
+            play_idx = Some(resume.action);
+        } else {
+            ui.ctx().request_repaint_after(resume.at.saturating_duration_since(std::time::Instant::now()));
+        }
+    }
     let mut moved = None;
     let recording_row = recording.and_then(|(_, i)| rows.get(i).map(|r| (i, r.steps.len())));
     let reveal = recording_row.filter(|row| app.ui.actions.reveal_recording != Some(*row));
@@ -971,10 +1045,44 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         if mode_button.clicked() {
             app.ui.actions.button_mode = !app.ui.actions.button_mode;
         }
+        let playback = app.session.actions.playback_mode();
+        let playback_label = match playback {
+            "step" => tl!("Step by Step"),
+            "pause" => tl!("Pause For"),
+            _ => tl!("Accelerated"),
+        };
+        let playback_button = ui.add_enabled(!recording_now, egui::Button::new(playback_label).small()).on_hover_text(tl!("Playback Options"));
+        playback_button.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, !recording_now, playback_label));
+        if playback_button.clicked() {
+            let mode = match playback {
+                "accelerated" => "step",
+                "step" => "pause",
+                _ => "accelerated",
+            };
+            app.ui.actions.step_from = None;
+            app.ui.actions.pause_resume = None;
+            let _ = app.run("actions.setPlayback", json!({"mode": mode}));
+        }
     });
     if let Some(i) = play_idx {
-        match app.run("actions.play", json!({"action": i})) {
-            Ok(v) => report_play(app, &v),
+        app.ui.actions.pause_resume = None;
+        let mut params = json!({"action": i});
+        if app.session.actions.playback_mode() != "accelerated" {
+            params["count"] = json!(1);
+            if let Some((_, from)) = app.ui.actions.step_from.filter(|(action, _)| *action == i) {
+                params["from"] = json!(from);
+            }
+        } else {
+            app.ui.actions.step_from = None;
+        }
+        match app.run("actions.play", params) {
+            Ok(v) => {
+                note_playback(app, i, &v);
+                if let Some(resume) = app.ui.actions.pause_resume {
+                    ui.ctx().request_repaint_after(resume.at.saturating_duration_since(std::time::Instant::now()));
+                }
+                report_play(app, &v);
+            }
             Err(e) => {
                 let template = "Action playback failed: {error}";
                 app.ui.status = crate::i18n::fmt(tl!(template), &[("error", &e)]);
@@ -1613,5 +1721,39 @@ mod tests {
         assert!(!h.state().ui.actions.button_mode);
         assert!(h.query_by_label("Button Mode").is_some());
         assert_eq!(h.query_all_by_role(egui::accesskit::Role::CheckBox).count(), 1, "the step list returns when Button Mode is turned off");
+    }
+
+    #[test]
+    fn playback_options_step_through_the_action_and_pause_for_waits() {
+        use egui_kittest::{Harness, kittest::Queryable};
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({"width": 16, "height": 16})).unwrap();
+        let steps = ["A", "B", "C"].map(|n| ("layer.new.layer".to_string(), json!({"name": n})));
+        app.session.actions.list.push(Action::new("Three", steps.to_vec()));
+        let mut h = Harness::builder().with_size(vec2(420.0, 280.0)).build_ui_state(|ui, app| panel(app, ui), app);
+        h.run_steps(3);
+        let layers = |h: &Harness<'_, PhotocraftApp>| h.state().session.active().unwrap().doc.layers.len();
+        let before = layers(&h);
+        h.get_by_label("Accelerated").click();
+        h.run_steps(2);
+        assert!(h.query_by_label("Step by Step").is_some());
+        h.get_by_label("Play selection").click();
+        h.run_steps(3);
+        assert_eq!(layers(&h), before + 1, "step by step plays one step");
+        h.get_by_label("Play selection").click();
+        h.run_steps(3);
+        assert_eq!(layers(&h), before + 2, "the next click continues");
+        h.get_by_label("Play selection").click();
+        h.run_steps(3);
+        assert_eq!(layers(&h), before + 3, "the third click finishes the action");
+        assert!(h.state().ui.actions.step_from.is_none());
+        h.get_by_label("Step by Step").click();
+        h.run_steps(2);
+        assert!(h.query_by_label("Pause For").is_some());
+        h.get_by_label("Play selection").click();
+        h.run_steps(2);
+        assert_eq!(layers(&h), before + 4, "Pause For plays one step");
+        assert_eq!(h.state().ui.actions.step_from, Some((0, 1)));
+        assert!(h.state().ui.actions.pause_resume.is_some(), "the next step waits out the pause");
     }
 }

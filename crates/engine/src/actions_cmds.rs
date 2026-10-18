@@ -98,11 +98,31 @@ pub struct ActionState {
     /// Bumped whenever `list` changes, so the preset store can skip unchanged writes.
     #[serde(skip)]
     pub rev: u64,
+    /// Playback Options: `accelerated`, `step`, or `pause`. Empty means accelerated.
+    /// Session-only: `actions.json` stores the action list, not this mode.
+    #[serde(default)]
+    pub playback_mode: String,
+    /// Seconds between steps when playback is `pause`. Not written to `actions.json`.
+    #[serde(default)]
+    pub pause_seconds: f64,
 }
 
 impl ActionState {
     pub(crate) fn touch(&mut self) {
         self.rev = self.rev.saturating_add(1);
+    }
+
+    /// `accelerated`, `step`, or `pause`. Anything else, including a missing value, is accelerated.
+    pub fn playback_mode(&self) -> &str {
+        match self.playback_mode.as_str() {
+            "step" | "pause" => self.playback_mode.as_str(),
+            _ => "accelerated",
+        }
+    }
+
+    /// Pause between steps. Zero or a non-finite value is one second, and the cap is 60.
+    pub fn pause_seconds(&self) -> f64 {
+        if self.pause_seconds.is_finite() && self.pause_seconds > 0.0 { self.pause_seconds.min(60.0) } else { 1.0 }
     }
 }
 
@@ -234,7 +254,12 @@ fn from_step(p: &Value, len: usize) -> Result<usize> {
 fn list(s: &mut Session, _p: &Value) -> Result<Value> {
     let actions: Vec<Value> = s.actions.list.iter().map(|a| json!({"name": a.name, "steps": a.steps.len(), "set": a.set})).collect();
     let recording = s.actions.recording.and_then(|(_, i)| s.actions.list.get(i).map(|a| a.name.clone()));
-    Ok(json!({"actions": actions, "recording": recording}))
+    Ok(json!({
+        "actions": actions,
+        "recording": recording,
+        "playback": s.actions.playback_mode(),
+        "pauseSeconds": s.actions.pause_seconds(),
+    }))
 }
 
 fn get(s: &mut Session, p: &Value) -> Result<Value> {
@@ -307,31 +332,41 @@ fn stop(s: &mut Session, _p: &Value) -> Result<Value> {
     Ok(json!({"action": action.name, "steps": action.steps.len()}))
 }
 
-fn run_recorded(s: &mut Session, action: &Action, from: usize) -> (u64, Option<Value>) {
+/// `limit` stops after that many enabled steps. The third value is the step index to pass as
+/// `from` to run whatever remains (`steps.len()` when the action finished).
+fn run_recorded(s: &mut Session, action: &Action, from: usize, limit: Option<usize>) -> (u64, Option<Value>, usize) {
     let mut ran = 0u64;
     let mut failed = None;
+    let mut next = action.steps.len();
     for (i, (id, params)) in action.enabled_steps().skip_while(|(i, _)| *i < from) {
+        if limit.is_some_and(|n| ran >= n as u64) {
+            next = i;
+            break;
+        }
         if let Some(auth) = s.authorize
             && let Err(e) = auth(id, params)
         {
             failed = Some(json!({"step": i, "id": id, "error": e.to_string()}));
+            next = i;
             break;
         }
         match s.execute(id, params.clone()) {
             Ok(value) => {
                 if let Some(error) = nested_failure(id, &value) {
                     failed = Some(json!({"step": i, "id": id, "error": error}));
+                    next = i;
                     break;
                 }
                 ran += 1;
             }
             Err(e) => {
                 failed = Some(json!({"step": i, "id": id, "error": e.to_string()}));
+                next = i;
                 break;
             }
         }
     }
-    (ran, failed)
+    (ran, failed, next)
 }
 
 /// Suspend recording while a called action executes. Keep its commands in the journal
@@ -370,15 +405,62 @@ pub fn nested_failure(id: &str, value: &Value) -> Option<String> {
     })
 }
 
+/// How many enabled steps to run. Missing or null means the rest of the action.
+pub fn play_limit(p: &Value) -> Result<Option<usize>> {
+    let Some(v) = p.get("count") else { return Ok(None) };
+    if v.is_null() {
+        return Ok(None);
+    }
+    let Some(n) = v.as_u64().and_then(|n| usize::try_from(n).ok()) else {
+        return Err(bad("actions.play", "\"count\" must be a non-negative integer"));
+    };
+    if n > 10_000 {
+        return Err(bad("actions.play", "\"count\" is too large"));
+    }
+    Ok(Some(n))
+}
+
 fn play(s: &mut Session, p: &Value) -> Result<Value> {
     let (action, from) = playback_plan(s, p)?;
+    let limit = play_limit(p)?;
     let recording = begin_playback(s, &action)?;
-    let (ran, failed) = run_recorded(s, &action, from);
+    let (ran, failed, next) = run_recorded(s, &action, from, limit);
     finish_playback(s, recording, &action, from);
-    Ok(match failed {
+    let mut out = match failed {
         Some(f) => json!({"action": action.name, "ran": ran, "failed": f}),
         None => json!({"action": action.name, "ran": ran}),
-    })
+    };
+    if limit.is_some()
+        && let Some(obj) = out.as_object_mut()
+    {
+        obj.insert("next".into(), json!(next));
+    }
+    if s.actions.playback_mode() == "pause"
+        && let Some(obj) = out.as_object_mut()
+    {
+        obj.insert("pauseSeconds".into(), json!(s.actions.pause_seconds()));
+    }
+    Ok(out)
+}
+
+fn set_playback(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "actions.setPlayback";
+    let mode = match p.get("mode").and_then(Value::as_str) {
+        Some(mode) if matches!(mode, "accelerated" | "step" | "pause") => mode.to_string(),
+        Some(_) => return Err(bad(cmd, "mode must be accelerated, step, or pause")),
+        None => return Err(bad(cmd, "needs \"mode\"")),
+    };
+    if let Some(seconds) = p.get("seconds") {
+        let n = seconds.as_f64().filter(|n| n.is_finite() && *n > 0.0 && *n <= 60.0);
+        let Some(n) = n else {
+            return Err(bad(cmd, "\"seconds\" must be a number from just above 0 to 60"));
+        };
+        s.actions.pause_seconds = n;
+    } else if s.actions.pause_seconds <= 0.0 || !s.actions.pause_seconds.is_finite() {
+        s.actions.pause_seconds = 1.0;
+    }
+    s.actions.playback_mode = mode;
+    Ok(json!({"playback": s.actions.playback_mode(), "pauseSeconds": s.actions.pause_seconds()}))
 }
 
 pub(crate) fn not_playing(s: &Session, cmd: &str) -> Result<()> {
@@ -626,7 +708,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "List Actions",
             menu: &[],
             shortcut: None,
-            params: "{} → {actions:[{name, steps:count, set:name|null}], recording:name|null}",
+            params: "{} → {actions:[{name, steps:count, set:name|null}], recording:name|null, playback:\"accelerated\"|\"step\"|\"pause\", pauseSeconds:number}",
             enabled: always,
             run: list,
             journal: false,
@@ -666,7 +748,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "Play Action",
             menu: &[],
             shortcut: None,
-            params: r##"{"action":name|index, "from":step?} → {action, ran, failed?:{step, id, error}}. step and from are 0-based; steps switched off with actions.toggle are skipped. Stops at the first error (the command still returns ok, with failed set) and leaves one history step per step that ran. Nested calls are supported up to 16 levels; cycles are rejected. Recording stores a named call rather than its expanded commands. Each step is checked with Session::authorize when one is installed."##,
+            params: r##"{"action":name|index, "from":step?, "count":n?} → {action, ran, failed?:{step, id, error}, next?:step, pauseSeconds?:number}. step and from are 0-based; steps switched off with actions.toggle are skipped. count (at most 10000) runs that many enabled steps and returns next, the step index to pass as from to continue (the action's length when it finished). pauseSeconds is set when Playback Options is pause: headless callers wait that many seconds before the next play. Stops at the first error (the command still returns ok, with failed set) and leaves one history step per step that ran. Nested calls are supported up to 16 levels; cycles are rejected. Recording stores a named call rather than its expanded commands. Each step is checked with Session::authorize when one is installed."##,
             enabled: always,
             run: play,
             journal: false,
@@ -719,6 +801,16 @@ pub fn specs() -> Vec<CommandSpec> {
             params: r##"{"action":name|index, "step":index, "params":object} → {action, step}. Replaces that step's parameters. Numbers, strings and booleans are what the Actions panel edits."##,
             enabled: always,
             run: set_step,
+            journal: false,
+        },
+        CommandSpec {
+            id: "actions.setPlayback",
+            label: "Playback Options",
+            menu: &[],
+            shortcut: None,
+            params: r##"{"mode":"accelerated"|"step"|"pause", "seconds":number?} → {playback, pauseSeconds}. Step and pause play one step at a time when the caller passes count 1, and the result's next is the step to continue from. Pause names the seconds to wait between steps (default 1, at most 60). The mode is session state; actions.json does not store it."##,
+            enabled: always,
+            run: set_playback,
             journal: false,
         },
     ]
@@ -1519,5 +1611,46 @@ mod tests {
         assert!(s.execute("actions.setStep", json!({"action": 0, "step": 5, "params": {}})).is_err());
         assert!(s.execute("actions.setStep", json!({"action": 0, "step": 0, "params": [1]})).is_err());
         assert!(s.execute("actions.setStep", json!({"action": 0, "params": {}})).is_err());
+    }
+
+    #[test]
+    fn playback_options_step_one_at_a_time_and_pause_names_the_wait() {
+        let mut s = Session::new();
+        s.execute("file.new", json!({"width": 8, "height": 8})).unwrap();
+        let step = |name: &str| ("layer.new.layer".to_string(), json!({"name": name}));
+        s.actions.list.push(Action::new("Three", vec![step("A"), step("B"), step("C")]));
+        let layers = |s: &Session| s.active().unwrap().doc.layers.len();
+        let before = layers(&s);
+
+        assert!(s.execute("actions.setPlayback", json!({"mode": "fast"})).is_err());
+        assert!(s.execute("actions.setPlayback", json!({})).is_err());
+        assert!(s.execute("actions.setPlayback", json!({"mode": "pause", "seconds": 0})).is_err());
+        assert!(s.execute("actions.setPlayback", json!({"mode": "pause", "seconds": 61})).is_err());
+        assert!(s.execute("actions.setPlayback", json!({"mode": "pause", "seconds": -2})).is_err());
+        s.execute("actions.setPlayback", json!({"mode": "step"})).unwrap();
+        let one = s.execute("actions.play", json!({"action": 0, "count": 1})).unwrap();
+        assert_eq!(one["ran"], 1);
+        assert_eq!(one["next"], 1);
+        assert!(one.get("pauseSeconds").is_none());
+        assert_eq!(layers(&s), before + 1);
+
+        s.execute("actions.setPlayback", json!({"mode": "pause", "seconds": 2})).unwrap();
+        let two = s.execute("actions.play", json!({"action": 0, "from": 1, "count": 1})).unwrap();
+        assert_eq!(two["ran"], 1);
+        assert_eq!(two["next"], 2);
+        assert_eq!(two["pauseSeconds"], 2.0);
+        assert_eq!(layers(&s), before + 2);
+        assert!(s.execute("actions.play", json!({"action": 0, "count": -1})).is_err());
+        assert!(s.execute("actions.play", json!({"action": 0, "count": 10_001})).is_err());
+
+        let listed = s.execute("actions.list", json!({})).unwrap();
+        assert_eq!(listed["playback"], "pause");
+        assert_eq!(listed["pauseSeconds"], 2.0);
+        // A full play ignores the pause as a wait: headless playback still runs the remaining steps.
+        let rest = s.execute("actions.play", json!({"action": "Three", "from": 2})).unwrap();
+        assert_eq!(rest["ran"], 1);
+        assert_eq!(rest["pauseSeconds"], 2.0);
+        assert!(rest.get("next").is_none(), "next is only returned when count is set");
+        assert_eq!(layers(&s), before + 3);
     }
 }
