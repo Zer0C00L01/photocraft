@@ -155,6 +155,13 @@ impl TaggedBlock {
         Self::is_foreign_order_signature(&self.signature)
     }
 
+    /// `true` for a "Saving Merged Transparency" marker: the merged image's first extra channel
+    /// is its transparency. The specification's keys are `Mtrn`, `Mt16` and `Mt32`; Photoshop
+    /// 25.12 writes `MTrn` in a layered TIFF that keeps transparency next to spot channels.
+    pub fn is_merged_transparency_marker(&self) -> bool {
+        matches!(&self.key, b"Mtrn" | b"MTrn" | b"Mt16" | b"Mt32")
+    }
+
     /// Key as a string (lossy).
     pub fn key_str(&self) -> String {
         String::from_utf8_lossy(&self.key).into_owned()

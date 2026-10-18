@@ -169,3 +169,8 @@ sync_github_name = true
 [people.Silvertree2010]
 display_name = "Netter"
 sync_github_name = false
+
+[people.jasallen]
+real_name = "Jason DeBoever"
+display_name = "jasallen"
+sync_github_name = true
