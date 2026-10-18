@@ -298,6 +298,7 @@ fn command_list(a: &Args) -> Result<Vec<(String, Value)>, String> {
 fn run_cmds(a: &Args, out: &mut dyn Write, err: &mut dyn Write) -> R {
     let opts = export_opts(a)?;
     let mut h = Headless::trusted_local();
+    photocraft_engine::dtf_cmds::ensure_preset(&mut h.session);
     // Opening, running commands and exporting can all notice the same missing font:
     // one `run` invocation reports each warning line at most once.
     let mut reported_fonts = std::collections::HashSet::<String>::new();

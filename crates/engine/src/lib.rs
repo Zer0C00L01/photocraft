@@ -36,6 +36,7 @@ pub mod display_color;
 pub mod distort_cmds;
 pub mod doc_path;
 pub mod document_preset_cmds;
+pub mod dtf_cmds;
 pub mod edit_cmds;
 pub mod edit_menu_cmds;
 pub mod eraser_cmds;

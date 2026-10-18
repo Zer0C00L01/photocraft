@@ -16,6 +16,7 @@
 # letters; the trailing "…" of dialog commands is kept. Plural rule: one|other (n != 1 -> other).
 
 # Channel Options and New Spot Channel (#3761)
+	DTF Spot Channel…	DTF-Volltonfarbkanal…
 	Channel Color	Kanalfarbe
 	Color Indicates:	Farbe kennzeichnet:
 	Solidity:	Solidität:

@@ -4220,6 +4220,7 @@ shape	Appearance	Izgled
 	ICO is limited to 256 × 256 pixels	ICO je ograničen na 256 × 256 piksela
 
 # Channel Options and New Spot Channel (#3761)
+	DTF Spot Channel…	DTF Kanal spot boje…
 	Channel Color	Boja kanala
 	Color Indicates:	Boja označava:
 	Ink Characteristics	Karakteristike mastila

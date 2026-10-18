@@ -578,6 +578,37 @@ fn set_color(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"action": name, "color": color}))
 }
 
+fn set_step(s: &mut Session, p: &Value) -> Result<Value> {
+    not_playing(s, "actions.setStep")?;
+    let idx = resolve(&s.actions.list, p, "actions.setStep")?;
+    let Some(step) = p.get("step").and_then(Value::as_u64).and_then(|n| usize::try_from(n).ok()) else {
+        return Err(bad("actions.setStep", "step must be a non-negative integer"));
+    };
+    let Some(params) = p.get("params").cloned() else {
+        return Err(bad("actions.setStep", "needs \"params\""));
+    };
+    if !params.is_object() {
+        return Err(bad("actions.setStep", "params must be an object"));
+    }
+    let stored = s.actions.list.get(idx).map(|a| a.steps.len()).ok_or_else(|| bad("actions.setStep", "no such action"))?;
+    let len = stored.saturating_add(pending_steps(s, idx).count());
+    if step >= len {
+        return Err(bad("actions.setStep", "step is out of range"));
+    }
+    if s.actions.recording.is_some_and(|(_, i)| i == idx) {
+        flush_recording(s)?;
+    }
+    let action = s.actions.list.get_mut(idx).ok_or_else(|| bad("actions.setStep", "no such action"))?;
+    let Some(slot) = action.steps.get_mut(step) else {
+        return Err(bad("actions.setStep", "step is out of range"));
+    };
+    slot.1 = params;
+    let name = action.name.clone();
+    s.actions.touch();
+    crate::dtf_cmds::note_edited_step(s, idx);
+    Ok(json!({"action": name, "step": step}))
+}
+
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         CommandSpec {
@@ -678,6 +709,16 @@ pub fn specs() -> Vec<CommandSpec> {
             params: r##"{"action":name|index, "color":""|"red"|"orange"|"yellow"|"green"|"blue"|"violet"|"gray"} → {action, color}. The Button Mode colour. Empty clears it."##,
             enabled: always,
             run: set_color,
+            journal: false,
+        },
+        CommandSpec {
+            id: "actions.setStep",
+            label: "Set Action Step",
+            menu: &[],
+            shortcut: None,
+            params: r##"{"action":name|index, "step":index, "params":object} → {action, step}. Replaces that step's parameters. Numbers, strings and booleans are what the Actions panel edits."##,
+            enabled: always,
+            run: set_step,
             journal: false,
         },
     ]
@@ -1360,7 +1401,7 @@ mod tests {
             json!({"from": -3}),
             json!({"action": "missing", "from": 4}),
         ];
-        for id in ["actions.list", "actions.get", "actions.record", "actions.stop", "actions.play", "actions.delete", "actions.move"] {
+        for id in ["actions.list", "actions.get", "actions.record", "actions.stop", "actions.play", "actions.delete", "actions.move", "actions.setStep"] {
             for p in &junk {
                 let _ = s.execute(id, p.clone());
             }
@@ -1386,9 +1427,10 @@ mod tests {
         let mut t = Session::new();
         t.attach_preset_store(crate::preset_store::open_dir(&dir));
         let listed = t.execute("actions.list", json!({})).unwrap();
-        assert_eq!(listed["actions"][0]["name"], "Kept");
-        assert_eq!(listed["actions"][0]["steps"], 1);
+        let kept = listed["actions"].as_array().and_then(|a| a.iter().find(|e| e["name"] == "Kept")).expect("Kept");
+        assert_eq!(kept["steps"], 1);
         assert_eq!(t.execute("actions.get", json!({"action": "Kept"})).unwrap()["steps"][0][0], "layer.new.layer");
+        assert!(listed["actions"].as_array().is_some_and(|a| a.iter().any(|e| e["name"] == "DTF")));
 
         // An action created before the store finishes loading is kept, and a different one on
         // disk is merged in.
@@ -1403,7 +1445,8 @@ mod tests {
         let mut bad = Session::new();
         let warnings = bad.attach_preset_store(crate::preset_store::open_dir(&dir));
         assert!(warnings.iter().any(|w| w.contains("actions")), "{warnings:?}");
-        assert!(bad.actions.list.is_empty());
+        assert_eq!(bad.actions.list.len(), 1);
+        assert_eq!(bad.actions.list[0].name, "DTF");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1465,5 +1508,16 @@ mod tests {
             assert!(s.execute("actions.setColor", bad).is_err());
         }
         assert!(s.actions.list[0].color.is_empty(), "rejected colours change nothing");
+    }
+
+    #[test]
+    fn set_step_replaces_one_steps_params() {
+        let mut s = Session::new();
+        s.actions.list.push(Action::new("White", vec![("image.dtf".into(), json!({"name": "White"}))]));
+        assert_eq!(s.execute("actions.setStep", json!({"action": "White", "step": 0, "params": {"contract": 3, "name": "Gloss"}})).unwrap()["step"], 0);
+        assert_eq!(s.actions.list[0].steps[0].1["name"], "Gloss");
+        assert!(s.execute("actions.setStep", json!({"action": 0, "step": 5, "params": {}})).is_err());
+        assert!(s.execute("actions.setStep", json!({"action": 0, "step": 0, "params": [1]})).is_err());
+        assert!(s.execute("actions.setStep", json!({"action": 0, "params": {}})).is_err());
     }
 }
