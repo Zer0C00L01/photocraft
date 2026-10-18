@@ -14,6 +14,11 @@ on:
     branches:
       - main
       - cursor/combined-build-2026-10-18-3c53
+  # The cloud-agent token can push this workflow but cannot start Actions.
+  # An issue opened by the owner, whose body contains the phrase below, builds
+  # the combined branch and publishes the pre-release.
+  issues:
+    types: [opened]
   workflow_dispatch:
 
 permissions:
@@ -34,11 +39,19 @@ env:
 jobs:
   package:
     name: Windows x64 MSI and portable zip
-    if: ${{ !contains(github.event.head_commit.message, 'skip-installer') }}
+    if: ${{ (github.event_name == 'issues' && github.event.issue.user.login == 'Zer0C00L01' && contains(github.event.issue.body, 'build-combined-installer-2026-10-18')) || (github.event_name != 'issues' && !contains(github.event.head_commit.message, 'skip-installer')) }}
     runs-on: windows-latest
     timeout-minutes: 180
+    outputs:
+      sha: ${{ steps.built.outputs.sha }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'issues' && 'cursor/combined-build-2026-10-18-3c53' || github.ref }}
+      - name: Record built commit
+        id: built
+        shell: bash
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - name: Check out craft-fonts (embedded fonts)
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -72,6 +85,7 @@ jobs:
           AZURE_CERT_PROFILE: ${{ secrets.AZURE_CERT_PROFILE }}
           CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
           CRAFT_FONTS_REQUIRED: "1"
+          PHOTOCRAFT_BUILD_SHA: ${{ steps.built.outputs.sha }}
         run: ./packaging/windows/package.ps1 -Arch x64
       - name: Checksums
         shell: pwsh
@@ -96,7 +110,7 @@ jobs:
   publish:
     name: Pre-release
     needs: package
-    if: ${{ !contains(github.event.head_commit.message, 'skip-installer') }}
+    if: ${{ (github.event_name == 'issues' && github.event.issue.user.login == 'Zer0C00L01' && contains(github.event.issue.body, 'build-combined-installer-2026-10-18')) || (github.event_name != 'issues' && !contains(github.event.head_commit.message, 'skip-installer')) }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -109,15 +123,17 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
+          RELEASE_SHA: ${{ needs.package.outputs.sha }}
         run: |
           set -eu
           tag=dtf-windows-x64
-          title="PhotoCraft 0.7.0 Windows x64 (unsigned DTF + Actions build)"
+          title="PhotoCraft Windows x64 (unsigned combined build)"
+          test -n "$RELEASE_SHA"
           test -n "$(find dist -name '*.msi' -print -quit)"
           cat > notes.md <<'EOF'
-          This is an unsigned build for Windows 10/11 64-bit. It is not an official PhotoCraft release. Windows shows a security warning because the installer is not signed.
+          This is an unsigned combined build for Windows 10/11 64-bit. It is not an official PhotoCraft release. Windows shows a security warning because the installer is not signed.
 
-          This build is PhotoCraft 0.7.0 plus TIFF spot and alpha channels, the DTF Spot Channel command, and a Photoshop-style Actions panel (sets, steps, Button Mode, and .atn import). Long gang sheets keep the white underbase in row strips so a large sheet can finish.
+          It starts from upstream PhotoCraft main (Button Mode, the PSD DPI fix, export presets, and Curves) and adds TIFF spot and alpha channels, the DTF Spot Channel command, Actions Playback Options, custom ICC import, and Ctrl+wheel zoom.
 
           ## Install over C:\Program Files\PhotoCraft
 
@@ -138,10 +154,10 @@ jobs:
                 gh release delete-asset "$tag" "$asset" --yes
               fi
             done
-            gh release edit "$tag" --prerelease --latest=false --title "$title" --target "$GITHUB_SHA" --notes-file notes.md
+            gh release edit "$tag" --prerelease --latest=false --title "$title" --target "$RELEASE_SHA" --notes-file notes.md
             gh release upload "$tag" --clobber dist/*
           else
             echo "Creating pre-release $tag"
-            gh release create "$tag" --prerelease --latest=false --title "$title" --target "$GITHUB_SHA" --notes-file notes.md dist/*
+            gh release create "$tag" --prerelease --latest=false --title "$title" --target "$RELEASE_SHA" --notes-file notes.md dist/*
           fi
           echo "Pre-release: https://github.com/${GH_REPO}/releases/tag/${tag}" >>"$GITHUB_STEP_SUMMARY"
