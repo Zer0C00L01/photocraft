@@ -165,3 +165,8 @@ sync_github_name = true
 
 [people.1Git2Clone]
 sync_github_name = true
+
+[people.jasallen]
+real_name = "Jason DeBoever"
+display_name = "jasallen"
+sync_github_name = true
