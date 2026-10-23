@@ -16,8 +16,8 @@ fn harness(background: bool) -> Harness<'static, PhotocraftApp> {
         PhotocraftApp::new(
             Session::new(),
             Services {
-                import: Some(Box::new(|name, bytes, depth| {
-                    photocraft_io::import_with_svg_group_depth(name, bytes, depth).map(|r| (r.document, r.warnings)).map_err(|e| e.to_string())
+                import: Some(Box::new(|name, bytes, opts| {
+                    photocraft_io::import_with_options(name, bytes, opts).map(|r| (r.document, r.warnings)).map_err(|e| e.to_string())
                 })),
                 ..Default::default()
             },
@@ -34,7 +34,7 @@ fn harness(background: bool) -> Harness<'static, PhotocraftApp> {
 fn open_together(h: &mut Harness<'static, PhotocraftApp>, n: usize) {
     let message = "The document “shot.png” has an embedded color profile that does not match the current RGB working space.";
     for _ in 0..n {
-        crate::prefs_ui::open_mismatch(h.state_mut(), message, "preserve", false, "__stacked");
+        crate::prefs_ui::open_mismatch(h.state_mut(), message, "preserve", false, "__stacked", serde_json::json!({}));
     }
     for _ in 0..100 {
         h.run_steps(2);
