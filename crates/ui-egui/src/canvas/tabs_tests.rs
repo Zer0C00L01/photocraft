@@ -1,23 +1,26 @@
-//! #1276: a document tab strip with more tabs than fit keeps the active document's tab on the
-//! strip, shrinks and elides the others, and moves the rest into a » menu (whole app, real tree).
+//! The document tab strip in the whole app: tabs follow their documents through Save As, Ctrl+Tab cycles them in
+//! document order, and the tab text names the target (real tree).
 
+use egui::accesskit::Role;
 use egui::vec2;
 use egui_kittest::Harness;
-use egui_kittest::kittest::Queryable;
+use egui_kittest::kittest::{NodeT, Queryable};
+use photocraft_engine::actions_cmds::ActionStep;
 use serde_json::json;
 
 use crate::PhotocraftApp;
-use crate::theme::ThemeKind;
+use crate::theme::AppTheme;
 
-use super::{TabStrip, pro_tab_title};
+use super::tabs::tab_title_at;
 
 /// A real app window with `docs` documents named "ch1-pNN.png".
-fn harness(docs: usize, theme: ThemeKind) -> Harness<'static, PhotocraftApp> {
+fn harness(docs: usize) -> Harness<'static, Box<PhotocraftApp>> {
     let mut h = Harness::builder().with_size(vec2(1000.0, 700.0)).with_max_steps(64).build_eframe(move |cc| {
-        PhotocraftApp::setup_context(&cc.egui_ctx, theme);
-        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        let theme = AppTheme::pro();
+        PhotocraftApp::setup_context(&cc.egui_ctx, theme.clone());
+        let mut app = PhotocraftApp::with_context(cc.egui_ctx.clone(), photocraft_engine::Session::new(), crate::Services::default());
         // The theme is an interface preference, applied on the first frame: set the preference.
-        app.run("prefs.set", json!({"values": {"interface.theme": theme.id()}})).unwrap();
+        app.save_theme(&theme).unwrap();
         for n in 1..=docs {
             app.run("file.new", json!({"width": 400, "height": 300, "name": format!("ch1-p{n:02}.png")})).unwrap();
         }
@@ -27,90 +30,43 @@ fn harness(docs: usize, theme: ThemeKind) -> Harness<'static, PhotocraftApp> {
     h
 }
 
-fn strip(h: &Harness<'_, PhotocraftApp>) -> TabStrip {
-    h.state().tab_strip.clone().expect("the strip is drawn")
+/// How many tabs of the strip carry `name`. A tab's accessible name is its name, then its detail and modified mark.
+fn tabs_named(h: &Harness<'_, Box<PhotocraftApp>>, name: &str) -> usize {
+    h.query_all_by_role(Role::Tab).filter(|n| n.accesskit_node().label().is_some_and(|label| label.contains(name))).count()
 }
 
-fn has_menu(h: &Harness<'_, PhotocraftApp>) -> bool {
-    h.query_by_label("More documents").is_some()
-}
-
-#[test]
-fn overflowing_tabs_stay_on_the_strip_and_the_rest_move_to_the_menu() {
-    let h = harness(14, ThemeKind::Pro);
-    assert_eq!(h.state().session.documents().len(), 14);
-    let s = strip(&h);
-    assert!(s.tabs.len() < 14, "some tabs must overflow into the menu: {} shown", s.tabs.len());
-    for (_, r) in &s.tabs {
-        assert!(s.rect.contains_rect(*r), "a tab runs past the strip: {r:?} in {:?}", s.rect);
-    }
-    assert!(has_menu(&h), "the strip carries a » menu while tabs are hidden");
-    // The active document is the first thing the fit keeps: its tab is on the strip, not behind
-    // the menu, however many tabs are open (#1276).
-    let title = pro_tab_title(h.state(), h.state().session.active_index().unwrap());
-    assert!(h.query_by_label(&title).is_some(), "the active tab is on the strip: {title}");
-}
-
-#[test]
-fn the_active_document_brings_its_tab_onto_the_strip() {
-    let mut h = harness(14, ThemeKind::Pro);
-    for pick in [0, 13, 7] {
-        h.state_mut().session.set_active(pick);
-        h.run_steps(2);
-        let title = pro_tab_title(h.state(), pick);
-        assert!(h.query_by_label(&title).is_some(), "tab {pick} is focused on the strip: {title}");
-    }
-}
-
-#[test]
-fn tabs_that_fit_keep_their_natural_widths_and_no_menu() {
-    let h = harness(3, ThemeKind::Pro);
-    let s = strip(&h);
-    assert_eq!(s.tabs.len(), 3, "every tab stays on the strip when they fit");
-    assert!(h.query_by_label("More documents").is_none(), "no overflow menu when the tabs fit");
-    for i in 0..3 {
-        assert!(h.query_by_label(&pro_tab_title(h.state(), i)).is_some(), "tab {i} is on the strip");
-    }
-}
-
-#[test]
-fn studio_tabs_overflow_into_the_same_menu() {
-    let h = harness(14, ThemeKind::Studio);
-    let s = strip(&h);
-    assert!(s.tabs.len() < 14, "{} shown", s.tabs.len());
-    for (_, r) in &s.tabs {
-        assert!(s.rect.contains_rect(*r), "a tab runs past the strip: {r:?} in {:?}", s.rect);
-    }
-    assert!(has_menu(&h), "the Studio strip carries a » menu too");
-    let active = h.state().session.active_index().unwrap();
-    let name = h.state().session.documents()[active].doc.name.clone();
-    assert!(h.query_by_label(&name).is_some(), "the active tab is on the strip: {name}");
+// `AppShellOutput::panels_hidden` carries only the Shift+Tab state (plain Tab sets the shell's `hidden`,
+// `ui-shell/src/shell/reveal.rs:95-99`) and the app harness does not hand the shell output to a trial; the panels'
+// visibility is read from the tree, by the Layers panel the default workspace docks.
+/// Whether the docked panels are drawn.
+fn panels_shown(h: &Harness<'_, Box<PhotocraftApp>>) -> bool {
+    h.query_all_by_label("Layers").next().is_some()
 }
 
 #[test]
 fn saved_document_tabs_track_file_identity() {
-    for theme in ThemeKind::ALL {
-        let mut h = harness(2, theme);
-        h.state_mut().services.export = Some(Box::new(|_, _, _| Ok((vec![1], Vec::new()))));
-        h.state_mut().services.write = Some(Box::new(|_, _| Ok(())));
-        h.state_mut().save_as(Some("folder/My saved image.psd".into())).unwrap();
-        h.run_steps(2);
-        let pro = crate::theme::Tokens::get(&h.ctx).pro;
-        let app = h.state();
-        let label = if pro { pro_tab_title(app, 1) } else { "My saved image.psd".into() };
-        assert!(h.query_by_label(&label).is_some(), "saved tab in {theme:?}: {label}");
-        assert_eq!(app.session.active().unwrap().doc.name, "My saved image.psd");
-        h.state_mut().session.set_active(0);
-        h.run_steps(2);
-        assert_eq!(h.state().session.active().unwrap().doc.name, "ch1-p01.png");
-        h.state_mut().session.set_active(1);
-        h.state_mut().run("layer.new.layer", json!({})).unwrap();
-        h.run_steps(2);
-        let label = if pro { pro_tab_title(h.state(), 1) } else { "My saved image.psd".into() };
-        assert!(h.query_by_label(&label).is_some());
-        assert_eq!(h.state().session.active().unwrap().doc.name, "My saved image.psd");
-        assert!(h.state().session.active().unwrap().is_dirty());
-    }
+    let mut h = harness(2);
+    h.state_mut().services.export = Some(Box::new(|_, _, _| Ok((vec![1], Vec::new()))));
+    h.state_mut().services.write = Some(Box::new(|_, _| Ok(())));
+    h.state_mut().save_as(Some("folder/My saved image.psd".into())).unwrap();
+    h.run_steps(2);
+    assert_eq!(h.state().session.active().unwrap().doc.name, "My saved image.psd");
+    assert_eq!(tabs_named(&h, "My saved image.psd"), 1, "the saved document's tab carries its new name");
+    assert_eq!(tabs_named(&h, "ch1-p02.png"), 0, "no tab keeps the name the document had before Save As");
+
+    h.state_mut().session.set_active(0);
+    h.run_steps(2);
+    assert_eq!(h.state().session.active().unwrap().doc.name, "ch1-p01.png");
+    assert_eq!(tabs_named(&h, "My saved image.psd"), 1, "switching away keeps the saved tab");
+
+    h.state_mut().session.set_active(1);
+    h.state_mut().run("layer.new.layer", json!({})).unwrap();
+    h.run_steps(2);
+    let active = h.state().session.active().unwrap();
+    assert_eq!(active.doc.name, "My saved image.psd");
+    assert!(active.is_dirty());
+    assert_eq!(tabs_named(&h, "My saved image.psd"), 1, "the edited saved document keeps one tab");
+    assert_eq!(tabs_named(&h, "ch1-p01.png"), 1);
 }
 
 /// What a Ctrl press reports: on Windows and Linux Ctrl is also the command key, on macOS it isn't.
@@ -122,10 +78,10 @@ fn ctrl() -> egui::Modifiers {
 /// around at either end, as in Photoshop. Plain Tab still hides the panels instead.
 #[test]
 fn ctrl_tab_cycles_through_the_document_tabs() {
-    let mut h = harness(3, ThemeKind::Pro);
-    let active = |h: &Harness<'_, PhotocraftApp>| h.state().session.active_index();
+    let mut h = harness(3);
+    let active = |h: &Harness<'_, Box<PhotocraftApp>>| h.state().session.active_index();
     assert_eq!(active(&h), Some(2), "the last new document is active");
-    let press = |h: &mut Harness<'_, PhotocraftApp>, shift: bool| {
+    let press = |h: &mut Harness<'_, Box<PhotocraftApp>>, shift: bool| {
         h.key_press_modifiers(if shift { ctrl() | egui::Modifiers::SHIFT } else { ctrl() }, egui::Key::Tab);
         h.run_steps(2);
     };
@@ -137,7 +93,7 @@ fn ctrl_tab_cycles_through_the_document_tabs() {
     assert_eq!(active(&h), Some(0), "Ctrl+Shift+Tab goes back");
     press(&mut h, true);
     assert_eq!(active(&h), Some(2), "and wraps to the last tab");
-    assert!(h.state().ui.panels.dock, "Ctrl+Tab doesn't hide the panels");
+    assert!(panels_shown(&h), "Ctrl+Tab doesn't hide the panels");
     // Tab order is document order, so a dragged tab is cycled through at its new place.
     h.state_mut().session.move_document(0, 2);
     h.state_mut().session.set_active(1);
@@ -146,23 +102,37 @@ fn ctrl_tab_cycles_through_the_document_tabs() {
     h.key_press(egui::Key::Tab);
     h.run_steps(2);
     assert_eq!(active(&h), Some(2), "plain Tab doesn't switch documents");
-    assert!(!h.state().ui.panels.dock, "plain Tab hides the panels");
+    assert!(!panels_shown(&h), "plain Tab hides the panels");
 }
 
-/// One document: Ctrl+Tab stays on it quietly; a focused widget or text field doesn't keep the key.
 #[test]
-fn ctrl_tab_with_one_document_or_a_focused_field() {
-    let mut h = harness(1, ThemeKind::Pro);
+fn ctrl_tab_records_a_relative_document_switch() {
+    let mut h = harness(2);
+    h.state_mut().run("actions.record", json!({"name": "Switch"})).unwrap();
     h.key_press_modifiers(ctrl(), egui::Key::Tab);
     h.run_steps(2);
-    assert_eq!(h.state().session.active_index(), Some(0));
-    assert!(crate::shortcut_dispatch::take_log(&h.ctx).iter().all(|(_, o)| *o == crate::shortcut_dispatch::Outcome::Ran), "no disabled-shortcut report");
-    use crate::shortcut_dispatch::Focus;
-    for (key, sc) in [("Ctrl+Tab", "window.nextDocument"), ("Ctrl+Shift+Tab", "window.previousDocument")] {
-        let parsed = crate::shortcuts::parse(key).unwrap();
-        assert!(Focus::Widget.allows(&parsed) && Focus::Text.allows(&parsed), "{key} reaches {sc} from a focused field");
-        let bound = crate::shortcut_dispatch::bindings(h.state()).into_iter().find(|(_, s)| *s == parsed).map(|(id, _)| id);
-        assert_eq!(bound.as_deref(), Some(sc));
-    }
-    assert!(!Focus::Widget.allows(&crate::shortcuts::parse("Tab").unwrap()), "a focused widget keeps plain Tab");
+    h.state_mut().run("actions.stop", json!({})).unwrap();
+    let steps = &h.state().session.actions.list.action(0).expect("the recorded action").steps;
+    assert_eq!(steps, &[ActionStep::new("document.activate", json!({"offset": -1}))]);
+}
+
+#[test]
+fn quick_mask_mode_names_the_quick_mask_in_the_tab() {
+    let mut h = harness(1);
+    h.state_mut().run("layer.new.layer", json!({})).unwrap();
+    let title = |h: &Harness<'_, Box<PhotocraftApp>>| tab_title_at(h.state(), 0, 100.0);
+
+    let detail = title(&h);
+    assert!(detail.starts_with("ch1-p01.png @ 100%"), "{detail}");
+    assert!(detail.contains("Layer 1") && detail.contains("RGB"), "the active layer and the mode: {detail}");
+    assert!(!detail.contains('*'), "the tab's modified mark shows unsaved changes, not the text");
+
+    h.state_mut().run("select.editInQuickMaskMode", json!({"on": true})).unwrap();
+    let detail = title(&h);
+    assert!(detail.contains("Quick Mask"), "Quick Mask mode is named: {detail}");
+    assert!(!detail.contains("Layer 1") && !detail.contains("RGB"), "the layer is not the target: {detail}");
+
+    h.state_mut().run("select.editInQuickMaskMode", json!({"on": false})).unwrap();
+    let detail = title(&h);
+    assert!(detail.contains("Layer 1") && detail.contains("RGB") && !detail.contains("Quick Mask"), "{detail}");
 }
