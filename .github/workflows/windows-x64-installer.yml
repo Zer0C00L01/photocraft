@@ -16,7 +16,8 @@ on:
       - cursor/combined-build-2026-10-18-3c53
   # The cloud-agent token can push this workflow but cannot start Actions.
   # An issue opened by the owner, whose body contains the phrase below, builds
-  # the combined branch and publishes the pre-release.
+  # main and publishes the pre-release. A push from the cloud agent does not
+  # start Actions.
   issues:
     types: [opened]
   workflow_dispatch:
@@ -47,7 +48,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'issues' && 'cursor/combined-build-2026-10-18-3c53' || github.ref }}
+          ref: ${{ github.event_name == 'issues' && 'main' || github.ref }}
       - name: Record built commit
         id: built
         shell: bash
