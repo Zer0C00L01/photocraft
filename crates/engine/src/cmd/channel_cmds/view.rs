@@ -136,7 +136,7 @@ pub(crate) fn fix_view(st: &mut DocState) {
 }
 
 /// Bump the revision for a view-only change without dirtying a clean document.
-pub(super) fn touch(st: &mut DocState) {
+pub(crate) fn touch(st: &mut DocState) {
     let clean = st.saved_revision == st.revision;
     st.revision += 1;
     st.view_revision += 1;

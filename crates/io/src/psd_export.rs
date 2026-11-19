@@ -342,8 +342,6 @@ impl Ex<'_> {
         }
         flags.set_hidden(!l.visible);
         flags.set_transparency_protected(l.locks.transparency);
-        // Bit 3 (with bit 4 clear) is the flag Photoshop sets on every layer it writes.
-        flags.0 |= LayerFlags::BIT4_USEFUL;
         let mut blocks = vec![TaggedBlock::unicode_name(&l.name), TaggedBlock::layer_id(id)];
         let lspf = blocks::lspf_from_locks(&l.locks);
         if lspf != 0 {
@@ -1075,8 +1073,6 @@ impl Ex<'_> {
             match &l.content {
                 LayerContent::Group(g) => {
                     let id = self.fresh_id();
-                    let mut divider_flags = LayerFlags(0);
-                    divider_flags.0 |= LayerFlags::BIT4_USEFUL;
                     self.records.push(LayerRecord {
                         channels: self.empty_channels(),
                         blending_ranges: BlendingRanges::full(self.cc),
@@ -1086,7 +1082,6 @@ impl Ex<'_> {
                             TaggedBlock::layer_id(id),
                             TaggedBlock::section_divider(SectionType::BoundingDivider, None, None),
                         ],
-                        flags: divider_flags,
                         ..Default::default()
                     });
                     self.emit(&g.children, tick);

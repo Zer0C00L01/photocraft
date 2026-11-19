@@ -127,6 +127,7 @@ pub use planes::{
     GraySurface, IsolatedCurveChannel, channel_format, color_count, curve_channel_for_colors, filter_mask_curve_channel, isolated_curve_channel,
     isolated_curve_channel_for, isolated_curve_channel_with_params, layer_mask_curve_channel, next_alpha_name,
 };
+pub(crate) use planes::plane_surface;
 pub(crate) use refs::source_spec;
 pub use refs::{Blending, ChanRef, parse_ref};
 use selection::{load_selection, quick_mask, save_selection};
@@ -138,8 +139,8 @@ pub(crate) use targeting::{
 };
 pub use targeting::{follows_filter_mask, follows_target, follows_vector_mask_target, gray_target, read_target_surface};
 pub use tone_target::{ToneTarget, resolve_tone_target};
-pub(crate) use view::fix_view;
 pub use view::{ChannelTarget, ChannelView, QuickMaskOptions, color_names, composite_name};
+pub(crate) use view::{fix_view, touch};
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
